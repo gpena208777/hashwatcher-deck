@@ -425,6 +425,8 @@ struct Miner {
     /// Hashrate samples from background polls, newest last. Kept for 24 hours.
     chart: Vec<ChartSample>,
     chart_dirty: bool,
+    /// Current Harlo-OS is /api/telemetry. Older firmware stays on /api/v1/status.
+    harlo_legacy: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -737,6 +739,7 @@ impl App {
                 record.misses = existing.misses;
                 record.chart = existing.chart.clone();
                 record.chart_dirty = existing.chart_dirty;
+                record.harlo_legacy = existing.harlo_legacy;
                 if record.model.is_empty() {
                     record.model = existing.model.clone();
                 }
@@ -1205,7 +1208,18 @@ impl App {
             .map(|miner| miner.family)
             .unwrap_or("");
         match family {
-            "harlo" => format!("http://{ip}/api/v1/pool"),
+            "harlo" => {
+                if self
+                    .miners
+                    .iter()
+                    .find(|miner| miner.host == host)
+                    .is_some_and(|miner| miner.harlo_legacy)
+                {
+                    format!("http://{ip}/api/v1/pool")
+                } else {
+                    format!("http://{ip}/api/info")
+                }
+            }
             "bitaxe" | "luckyMiner" => format!("http://{ip}/api/overview"),
             "braiins" => match self
                 .miners
@@ -1248,7 +1262,18 @@ impl App {
             .unwrap_or("");
         let path = match family {
             "bitaxe" => "/api/system/info",
-            "harlo" => "/api/v1/status",
+            "harlo" => {
+                if self
+                    .miners
+                    .iter()
+                    .find(|miner| miner.host == host)
+                    .is_some_and(|miner| miner.harlo_legacy)
+                {
+                    "/api/v1/status"
+                } else {
+                    "/api/telemetry"
+                }
+            }
             "braiins" => "/api/v1/miner/stats",
             "vnish" => "/api/v1/summary",
             "luckyMiner" => "/api/system/info",
@@ -1736,6 +1761,7 @@ impl App {
                     if let Some(miner) = self.miners.iter_mut().find(|miner| miner.host == probe.host) {
                         apply_http_poll(miner, text, &doc);
                         detail = miner.family == "harlo"
+                            && (miner.model.is_empty() || miner.harlo_legacy)
                             || (miner.family == "luckyMiner" && !has_reading(miner))
                             || (miner.family == "bitaxe"
                                 && miner.hashrate_ths.is_none()
@@ -1762,7 +1788,14 @@ impl App {
                                 remember(miner);
                             }
                         } else if miner.family == "harlo" {
-                            apply_pool(miner, &doc);
+                            if miner.harlo_legacy {
+                                apply_pool(miner, &doc);
+                            } else if miner.model.is_empty() {
+                                miner.model = doc
+                                    .str("/profile/name")
+                                    .filter(|name| !name.is_empty())
+                                    .unwrap_or_else(|| "Harlo".to_owned());
+                            }
                         } else if miner.family == "braiins" {
                             let step = miner.detail_step;
                             if step == 0 {
@@ -3761,6 +3794,10 @@ fn save_chart(ip: &str, samples: &[ChartSample]) {
 }
 
 fn apply_http_poll(miner: &mut Miner, text: &str, doc: &JsonDoc) {
+    if miner.family == "harlo" && text.contains("Unknown API endpoint") && !miner.harlo_legacy {
+        miner.harlo_legacy = true;
+        return;
+    }
     let saved_hash = miner.hashrate_ths;
     let saved_power = miner.power_w;
     let saved_temp = miner.temp_c;
@@ -3857,19 +3894,59 @@ fn apply_harlo(miner: &mut Miner, doc: &JsonDoc) {
             "/hashrate_ghs",
         ],
     ));
-    miner.power_w = first_positive(doc, &["/wall_power_w", "/rail_power_w", "/power_watts", "/power"]);
+    miner.power_w = first_positive(
+        doc,
+        &["/device_power_w", "/wall_power_w", "/asic_rail_power_w", "/rail_power_w", "/power_watts", "/power"],
+    );
     miner.temp_c = first_positive(doc, &["/asic_temp_c", "/chip_temp", "/max_chip_temp", "/temperature", "/temp"]);
     miner.vr_temp = first_positive(doc, &["/vr_temp_c", "/vrTemp"]);
-    miner.fan = first_positive(doc, &["/fan_percent", "/fanspeed"]);
-    miner.fan_rpm = None;
-    set_fan_slots(miner, &[(miner.fan.unwrap_or(0.0), 0.0)]);
+    let mut fans = Vec::new();
+    for index in 0..4 {
+        if let Some(pct) = num(doc, &format!("/fans/{index}/percent")).filter(|pct| *pct > 0.0) {
+            fans.push((pct, 0.0));
+        }
+    }
+    if fans.is_empty() {
+        miner.fan = first_positive(doc, &["/fan_percent", "/fanspeed"]);
+        miner.fan_rpm = None;
+        if miner.fan.is_some() {
+            fans.push((miner.fan.unwrap_or(0.0), 0.0));
+        }
+    }
+    if !fans.is_empty() {
+        set_fan_slots(miner, &fans);
+    }
     miner.uptime_s = whole(doc, "/uptime_seconds").or_else(|| whole(doc, "/uptimeSeconds"));
-    miner.shares_accepted = whole(doc, "/accepted_shares").or_else(|| whole(doc, "/sharesAccepted"));
-    miner.shares_rejected = whole(doc, "/rejected_shares").or_else(|| whole(doc, "/sharesRejected"));
-    commit_best_diff(miner, first_positive(doc, &["/best_share", "/bestDiff"]));
-    miner.best_session = first_positive(doc, &["/session_best_share", "/bestSessionDiff"]);
-    miner.frequency = first_positive(doc, &["/frequency_mhz", "/current_frequency_mhz", "/frequency"]);
-    miner.voltage = first_positive(doc, &["/core_mv", "/measured_core_mv", "/voltage"]);
+    let mut accepted = 0_u64;
+    let mut rejected = 0_u64;
+    let mut saw_pool = false;
+    for index in 0..4 {
+        if let Some(shares) = whole(doc, &format!("/pools/{index}/accepted_shares")) {
+            accepted = accepted.saturating_add(shares);
+            saw_pool = true;
+        }
+        if let Some(shares) = whole(doc, &format!("/pools/{index}/rejected_shares")) {
+            rejected = rejected.saturating_add(shares);
+            saw_pool = true;
+        }
+    }
+    if saw_pool {
+        miner.shares_accepted = Some(accepted);
+        miner.shares_rejected = Some(rejected);
+    } else {
+        miner.shares_accepted = whole(doc, "/accepted_shares").or_else(|| whole(doc, "/sharesAccepted"));
+        miner.shares_rejected = whole(doc, "/rejected_shares").or_else(|| whole(doc, "/sharesRejected"));
+    }
+    commit_best_diff(
+        miner,
+        first_positive(doc, &["/best_share_all_time", "/best_share", "/bestDiff"]),
+    );
+    miner.best_session = first_positive(
+        doc,
+        &["/best_share_session", "/session_best_share", "/bestSessionDiff"],
+    );
+    miner.frequency = first_positive(doc, &["/active_pll_mhz", "/frequency_mhz", "/current_frequency_mhz", "/frequency"]);
+    miner.voltage = first_positive(doc, &["/core_voltage_mv", "/core_mv", "/measured_core_mv", "/voltage"]);
     if miner.name.is_empty() {
         miner.name = doc
             .str("/hostname")
@@ -4590,6 +4667,7 @@ fn blank(host: u8, ip: &str) -> Miner {
         misses: 0,
         chart: Vec::new(),
         chart_dirty: false,
+        harlo_legacy: false,
     }
 }
 
