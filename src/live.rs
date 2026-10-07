@@ -395,6 +395,16 @@ struct Miner {
     /// 0 cooling state, 1 hashboards. Braiins REST fills these after the stats poll.
     detail_step: u8,
     fan_manual: bool,
+    /// Last fan command that was sent: 1 auto, or 40/60/80/100.
+    fan_sent: u8,
+    /// Polls to ignore after a fan command, so the button stays on the mode we sent.
+    fan_hold: u8,
+    /// Canaan work mode that is active: 0, 1, or 2.
+    mode_sent: Option<u8>,
+    mode_hold: u8,
+    /// Braiins tune button that matches the active target.
+    tune_sent: Option<u8>,
+    tune_hold: u8,
     asic_pct: Option<f64>,
     hashrate_ths: Option<f64>,
     power_w: Option<f64>,
@@ -723,6 +733,12 @@ impl App {
                 record.fan_pcts = existing.fan_pcts;
                 record.fan_rpms = existing.fan_rpms;
                 record.fan_manual = existing.fan_manual;
+                record.fan_sent = existing.fan_sent;
+                record.fan_hold = existing.fan_hold;
+                record.mode_sent = existing.mode_sent;
+                record.mode_hold = existing.mode_hold;
+                record.tune_sent = existing.tune_sent;
+                record.tune_hold = existing.tune_hold;
                 record.asic_pct = existing.asic_pct;
                 record.uptime_s = existing.uptime_s;
                 record.pool = existing.pool.clone();
@@ -2940,8 +2956,12 @@ impl App {
                     self.send_post(&format!("http://{ip}/api/system/restart"), "Restarting miner");
                 }
                 "harlo" => self.send_post(&format!("http://{ip}/api/v1/reboot"), "Restarting miner"),
-                "braiins" => self.send_braiins(miner, "/api/v1/actions/restart", "", "Restarting miner"),
-                "canaan" => self.send_tcp_raw(miner.host, "ascset|0,reboot,0", "Restarting miner"),
+                "braiins" => {
+                    let _ = self.send_braiins(miner, "/api/v1/actions/restart", "", "Restarting miner");
+                }
+                "canaan" => {
+                    let _ = self.send_tcp_raw(miner.host, "ascset|0,reboot,0", "Restarting miner");
+                }
                 "bitmainZEC" => self.start_zec_reboot(miner),
                 "luxos" | "cgminer" => {
                     self.send_tcp_command(miner.host, "{\"command\":\"restart\"}", "Restarting miner");
@@ -2957,7 +2977,9 @@ impl App {
                     "{\"enabled\":false}",
                     "Pausing miner",
                 ),
-                "braiins" => self.send_braiins(miner, "/api/v1/actions/pause", "", "Pausing miner"),
+                "braiins" => {
+                    let _ = self.send_braiins(miner, "/api/v1/actions/pause", "", "Pausing miner");
+                }
                 _ => self.notice = "Pause is not available for this miner.".to_owned(),
             },
             "act-resume" => match miner.family {
@@ -2969,7 +2991,9 @@ impl App {
                     "{\"enabled\":true}",
                     "Resuming miner",
                 ),
-                "braiins" => self.send_braiins(miner, "/api/v1/actions/resume", "", "Resuming miner"),
+                "braiins" => {
+                    let _ = self.send_braiins(miner, "/api/v1/actions/resume", "", "Resuming miner");
+                }
                 _ => self.notice = "Resume is not available for this miner.".to_owned(),
             },
             _ if id.starts_with("tune-") => self.apply_braiins_tune(miner, id),
@@ -3004,6 +3028,7 @@ impl App {
             conf: String::new(),
         });
         self.zec_call("GET", "/cgi-bin/get_miner_conf.cgi", "", false);
+        self.remember_fan_sent(&miner.ip, speed);
     }
 
     fn start_zec_reboot(&mut self, miner: &Miner) {
@@ -3177,6 +3202,7 @@ impl App {
                         &format!("Setting fan to {speed}%"),
                     );
                 }
+                self.remember_fan_sent(ip, speed);
             }
             "harlo" => {
                 let body = if speed == "auto" {
@@ -3191,6 +3217,7 @@ impl App {
                 };
                 self.send_put(&format!("http://{ip}/api/v1/fans/1"), &body, &notice);
                 self.send_put(&format!("http://{ip}/api/v1/fans/2"), &body, &notice);
+                self.remember_fan_sent(ip, speed);
             }
             "canaan" => {
                 let speed_n = if speed == "auto" {
@@ -3204,9 +3231,42 @@ impl App {
                     format!("Setting fan to {speed}%")
                 };
                 self.send_tcp_raw(miner.host, &format!("ascset|0,fan-spd,{speed_n}"), &notice);
+                self.remember_fan_sent(ip, speed);
             }
             "bitmainZEC" => self.start_zec_fan(miner, speed),
             _ => self.notice = "Fan control is not available for this miner.".to_owned(),
+        }
+    }
+
+    fn remember_fan_sent(&mut self, ip: &str, speed: &str) {
+        let code = match speed {
+            "auto" => 1,
+            "40" => 40,
+            "60" => 60,
+            "80" => 80,
+            "100" => 100,
+            _ => return,
+        };
+        if let Some(stored) = self.miners.iter_mut().find(|item| item.ip == ip) {
+            stored.fan_sent = code;
+            stored.fan_hold = 2;
+            if code == 1 {
+                stored.fan_manual = false;
+            }
+        }
+    }
+
+    fn remember_mode_sent(&mut self, ip: &str, mode: u8) {
+        if let Some(stored) = self.miners.iter_mut().find(|item| item.ip == ip) {
+            stored.mode_sent = Some(mode);
+            stored.mode_hold = 2;
+        }
+    }
+
+    fn remember_tune_sent(&mut self, ip: &str, index: u8) {
+        if let Some(stored) = self.miners.iter_mut().find(|item| item.ip == ip) {
+            stored.tune_sent = Some(index);
+            stored.tune_hold = 2;
         }
     }
 
@@ -3223,7 +3283,9 @@ impl App {
         let label = canaan_mode_label(miner, mode);
         let field = if canaan_uses_worklevel(miner) { "worklevel" } else { "workmode" };
         let command = format!("ascset|0,{field},set,{mode}");
-        self.send_tcp_raw(miner.host, &command, &format!("Setting {label}"));
+        if self.send_tcp_raw(miner.host, &command, &format!("Setting {label}")) {
+            self.remember_mode_sent(&miner.ip, mode as u8);
+        }
     }
 
     fn send_patch(&mut self, url: &str, body: &str, notice: &str) {
@@ -3260,11 +3322,11 @@ impl App {
             .send(on_fetch);
     }
 
-    fn send_braiins(&mut self, miner: &Miner, path: &str, body: &str, notice: &str) {
+    fn send_braiins(&mut self, miner: &Miner, path: &str, body: &str, notice: &str) -> bool {
         self.notice = notice.to_owned();
         if miner.token.is_empty() {
             self.notice = "Send the Braiins login from HashWatcher, then try again.".to_owned();
-            return;
+            return false;
         }
         let headers = format!("Content-Type: application/json\nAuthorization: {}", miner.token);
         let _ = FetchRequest::put(&format!("http://{}{path}", miner.ip))
@@ -3272,6 +3334,7 @@ impl App {
             .body(body.as_bytes())
             .timeout(Duration::from_millis(2_500))
             .send(on_fetch);
+        true
     }
 
     fn apply_braiins_tune(&mut self, miner: &Miner, id: &str) {
@@ -3294,27 +3357,29 @@ impl App {
                 format!("Setting power target to {} W", tune.amount),
             ),
         };
-        self.send_braiins(miner, path, &body, &notice);
+        if self.send_braiins(miner, path, &body, &notice) {
+            self.remember_tune_sent(&miner.ip, index as u8);
+        }
     }
 
-    fn send_tcp_command(&mut self, host: u8, payload: &str, notice: &str) {
-        self.send_tcp(host, payload, notice, true);
+    fn send_tcp_command(&mut self, host: u8, payload: &str, notice: &str) -> bool {
+        self.send_tcp(host, payload, notice, true)
     }
 
-    fn send_tcp_raw(&mut self, host: u8, payload: &str, notice: &str) {
-        self.send_tcp(host, payload, notice, false);
+    fn send_tcp_raw(&mut self, host: u8, payload: &str, notice: &str) -> bool {
+        self.send_tcp(host, payload, notice, false)
     }
 
-    fn send_tcp(&mut self, host: u8, payload: &str, notice: &str, terminate: bool) {
+    fn send_tcp(&mut self, host: u8, payload: &str, notice: &str, terminate: bool) -> bool {
         self.notice = notice.to_owned();
         if self.sockets.len() >= MAX_SOCKETS {
             self.notice = "Port 4028 is busy. Try again in a moment.".to_owned();
-            return;
+            return false;
         }
         let ip = self.ip(host);
         let Some(socket) = socket::tcp_connect(&ip, 4028, on_socket) else {
             self.notice = "Could not open port 4028.".to_owned();
-            return;
+            return false;
         };
         let mut bytes = payload.as_bytes().to_vec();
         if terminate && !bytes.ends_with(b"\n") {
@@ -3333,6 +3398,7 @@ impl App {
                 socket,
             },
         );
+        true
     }
 
     fn set_outbound(&mut self, on: bool) {
@@ -4242,6 +4308,7 @@ fn apply_bitaxe(miner: &mut Miner, doc: &JsonDoc) {
             .or_else(|| doc.str("/deviceModel"))
             .unwrap_or_default();
     }
+    note_reported_fan(miner, doc);
 }
 
 fn apply_zyber(miner: &mut Miner, doc: &JsonDoc) {
@@ -4361,6 +4428,7 @@ fn apply_lucky_overview(miner: &mut Miner, doc: &JsonDoc) {
     if let Some(session) = labeled_difficulty(doc, &["/best_diff_session", "/bestSessionDiff"]) {
         miner.best_session = Some(session);
     }
+    note_reported_fan(miner, doc);
 }
 
 fn frame_ready(buf: &[u8]) -> bool {
@@ -4400,6 +4468,58 @@ fn frame_ready(buf: &[u8]) -> bool {
     false
 }
 
+fn bracket_mode(text: &str, key: &str) -> Option<i32> {
+    let needle = format!("{key}[");
+    let rest = text.split(&needle).nth(1)?;
+    let inside = rest.split(']').next()?.trim();
+    let token = inside.split_whitespace().next()?;
+    token.parse::<i32>().ok()
+}
+
+fn note_reported_mode(miner: &mut Miner, mode: u8) {
+    if miner.mode_hold > 0 {
+        miner.mode_hold = miner.mode_hold.saturating_sub(1);
+        return;
+    }
+    miner.mode_sent = Some(mode);
+}
+
+fn note_reported_fan(miner: &mut Miner, doc: &JsonDoc) {
+    let auto = num(doc, "/autofanspeed").or_else(|| num(doc, "/fans/0/mode"));
+    let Some(auto) = auto else {
+        return;
+    };
+    if miner.fan_hold > 0 {
+        miner.fan_hold = miner.fan_hold.saturating_sub(1);
+        return;
+    }
+    if auto > 0.0 {
+        miner.fan_manual = false;
+        miner.fan_sent = 1;
+        return;
+    }
+    miner.fan_manual = true;
+    let percent = num(doc, "/manualFanSpeed")
+        .or_else(|| num(doc, "/fans/0/speed"))
+        .or_else(|| num(doc, "/fanspeed"));
+    if let Some(preset) = percent.and_then(fan_preset) {
+        miner.fan_sent = preset;
+    }
+}
+
+fn fan_preset(percent: f64) -> Option<u8> {
+    let mut best = None;
+    let mut gap = 11.0;
+    for preset in [40_u8, 60, 80, 100] {
+        let distance = (percent - f64::from(preset)).abs();
+        if distance < gap {
+            gap = distance;
+            best = Some(preset);
+        }
+    }
+    best.filter(|_| gap <= 10.0)
+}
+
 fn bracket_value(text: &str, key: &str) -> Option<f64> {
     let needle = format!("{key}[");
     let rest = text.split(&needle).nth(1)?;
@@ -4435,6 +4555,11 @@ fn apply_aux_poll(miner: &mut Miner, text: &str) {
             }
             if !slots.is_empty() {
                 set_fan_slots(miner, &slots);
+            }
+            if let Some(mode) = bracket_mode(text, "WORKMODE").or_else(|| bracket_mode(text, "WORKLEVEL")) {
+                if (0..=2).contains(&mode) {
+                    note_reported_mode(miner, mode as u8);
+                }
             }
             if let Some(ghs) = bracket_value(text, "GHSspd") {
                 miner.hashrate_ths = Some(ghs / 1000.0);
@@ -4640,6 +4765,12 @@ fn blank(host: u8, ip: &str) -> Miner {
         token: String::new(),
         detail_step: 0,
         fan_manual: false,
+        fan_sent: 0,
+        fan_hold: 0,
+        mode_sent: None,
+        mode_hold: 0,
+        tune_sent: None,
+        tune_hold: 0,
         asic_pct: None,
         hashrate_ths: None,
         power_w: None,
@@ -5276,9 +5407,16 @@ fn chart_plot(samples: &[ChartSample], now: i64, span: i64, width: f32, height: 
     if window.len() < 2 {
         return (draws, stats);
     }
-    let pad = ((stats.max - stats.min) * 0.12).max(0.05);
-    let low = stats.min - pad;
-    let high = stats.max + pad;
+    let spread = (stats.max - stats.min).max(0.0);
+    let bottom_pad = (spread * 0.12).max(0.05);
+    // Full-screen charts keep a little extra room above the peak so small moves stay smooth.
+    let top_pad = if axes {
+        bottom_pad.max(stats.max.abs() * 0.012)
+    } else {
+        bottom_pad
+    };
+    let low = (stats.min - bottom_pad).max(0.0);
+    let high = stats.max + top_pad;
     let scale = (high - low).max(0.001);
     let mut mapped = Vec::with_capacity(window.len());
     for sample in &window {
@@ -5322,13 +5460,13 @@ fn chart_plot(samples: &[ChartSample], now: i64, span: i64, width: f32, height: 
         draws.push(Draw::text(
             0.0,
             0.0,
-            format_hashrate(Some(stats.max)),
+            format_hashrate(Some(high)),
             style!(size: 14, weight: FontWeight::SEMIBOLD, color: WHITE),
         ));
         draws.push(Draw::text(
             0.0,
             (plot_h - 18.0).max(0.0),
-            format_hashrate(Some(stats.min)),
+            format_hashrate(Some(low)),
             style!(size: 14, weight: FontWeight::SEMIBOLD, color: WHITE),
         ));
         let marks = [
@@ -9372,10 +9510,10 @@ fn fan_card(miner: &Miner, width: f32, height: f32) -> Node {
             body.push(row(
                 props!(gap: 6.0, width: (width - 28.0).max(80.0)),
                 [
-                    compact_pill("fan-40", "40%", false),
-                    compact_pill("fan-60", "60%", false),
-                    compact_pill("fan-80", "80%", false),
-                    compact_pill("fan-100", "100%", false),
+                    compact_pill("fan-40", "40%", miner.fan_sent == 40),
+                    compact_pill("fan-60", "60%", miner.fan_sent == 60),
+                    compact_pill("fan-80", "80%", miner.fan_sent == 80),
+                    compact_pill("fan-100", "100%", miner.fan_sent == 100),
                 ],
             ));
         }
@@ -9706,7 +9844,12 @@ fn controls_card(miner: &Miner, width: f32, height: f32) -> Node {
     if miner.family == "canaan" {
         let modes: Vec<Node> = canaan_mode_buttons(miner)
             .into_iter()
-            .map(|(id, label)| compact_pill(id, label, false))
+            .map(|(id, label)| {
+                let selected = miner
+                    .mode_sent
+                    .is_some_and(|mode| id == format!("mode-{mode}"));
+                compact_pill(id, label, selected)
+            })
             .collect();
         rows.push(row(props!(gap: 8.0, width: inner), modes));
     }
@@ -9716,7 +9859,13 @@ fn controls_card(miner: &Miner, width: f32, height: f32) -> Node {
             let buttons: Vec<Node> = tunes
                 .iter()
                 .enumerate()
-                .map(|(index, tune)| compact_pill(&format!("tune-{index}"), &tune.label, false))
+                .map(|(index, tune)| {
+                    compact_pill(
+                        &format!("tune-{index}"),
+                        &tune.label,
+                        miner.tune_sent == Some(index as u8),
+                    )
+                })
                 .collect();
             rows.push(row(props!(gap: 8.0, width: inner, wrap: true), buttons));
         }
