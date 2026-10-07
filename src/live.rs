@@ -178,6 +178,9 @@ struct App {
     total: u16,
     phase: Phase,
     selected: Option<String>,
+    chart_open: bool,
+    chart_span: u8,
+    chart_saved: i64,
     page: usize,
     message: String,
     notice: String,
@@ -401,8 +404,27 @@ struct Miner {
     voltage: Option<f64>,
     reachable: bool,
     misses: u8,
-    history: Vec<f64>,
+    /// Hashrate samples from background polls, newest last. Kept for 24 hours.
+    chart: Vec<ChartSample>,
+    chart_dirty: bool,
 }
+
+#[derive(Clone, Copy)]
+struct ChartSample {
+    at: i64,
+    hash: f32,
+}
+
+const CHART_SPANS: [(i64, &str); 8] = [
+    (5 * 60, "5 min"),
+    (15 * 60, "15 min"),
+    (30 * 60, "30 min"),
+    (60 * 60, "1 hour"),
+    (3 * 60 * 60, "3 hours"),
+    (6 * 60 * 60, "6 hours"),
+    (12 * 60 * 60, "12 hours"),
+    (24 * 60 * 60, "24 hours"),
+];
 
 impl App {
     fn new() -> Self {
@@ -418,6 +440,9 @@ impl App {
             total: 0,
             phase: Phase::NeedNetwork,
             selected: None,
+            chart_open: false,
+            chart_span: 0,
+            chart_saved: 0,
             page: 0,
             message: "Looking for the Deck network".to_owned(),
             notice: String::new(),
@@ -583,6 +608,23 @@ impl App {
         }
     }
 
+    fn flush_charts(&mut self, force: bool) {
+        let now = SystemTime::now().unix_secs;
+        if !force && now.saturating_sub(self.chart_saved) < 60 {
+            return;
+        }
+        if !self.miners.iter().any(|miner| miner.chart_dirty) {
+            return;
+        }
+        self.chart_saved = now;
+        for miner in &mut self.miners {
+            if miner.chart_dirty {
+                save_chart(&miner.ip, &miner.chart);
+                miner.chart_dirty = false;
+            }
+        }
+    }
+
     fn store_poll(&mut self) {
         bmc_wasm_sdk::kv::set("poll_s", (self.poll_ms / 1_000).to_string().as_bytes());
         self.touch_controls();
@@ -672,13 +714,17 @@ impl App {
                 record.voltage = existing.voltage.or(record.voltage);
                 record.reachable = existing.reachable;
                 record.misses = existing.misses;
-                record.history = existing.history.clone();
+                record.chart = existing.chart.clone();
+                record.chart_dirty = existing.chart_dirty;
                 if record.model.is_empty() {
                     record.model = existing.model.clone();
                 }
                 if record.user == existing.user && record.pass == existing.pass {
                     record.token = existing.token.clone();
                 }
+            }
+            if record.chart.is_empty() && !record.chart_dirty {
+                record.chart = load_chart(&record.ip);
             }
             next.push(record);
         }
@@ -2336,11 +2382,29 @@ impl App {
             return true;
         }
         if id == "back" {
+            if self.chart_open {
+                self.chart_open = false;
+                return true;
+            }
             self.selected = None;
             self.notice.clear();
             return true;
         }
+        if id == "chart-open" && self.selected.is_some() {
+            self.chart_open = true;
+            self.flush_charts(true);
+            return true;
+        }
+        if let Some(raw) = id.strip_prefix("span-") {
+            if let Ok(index) = raw.parse::<u8>() {
+                if (index as usize) < CHART_SPANS.len() {
+                    self.chart_span = index;
+                    return true;
+                }
+            }
+        }
         if let Some(ip) = id.strip_prefix("miner-") {
+            self.chart_open = false;
             self.selected = Some(ip.to_owned());
             self.notice.clear();
             return true;
@@ -3545,12 +3609,92 @@ fn remember(miner: &mut Miner) {
     miner.reachable = true;
     miner.misses = 0;
     if let Some(rate) = miner.hashrate_ths {
-        miner.history.push(rate);
-        if miner.history.len() > 48 {
-            let extra = miner.history.len() - 48;
-            miner.history.drain(0..extra);
+        record_chart(miner, SystemTime::now().unix_secs, rate);
+    }
+}
+
+fn record_chart(miner: &mut Miner, now: i64, value: f64) {
+    let hash = value as f32;
+    if !hash.is_finite() {
+        return;
+    }
+    if let Some(last) = miner.chart.last_mut() {
+        if now <= last.at {
+            last.at = now;
+            last.hash = hash;
+            miner.chart_dirty = true;
+            return;
         }
     }
+    miner.chart.push(ChartSample { at: now, hash });
+    let cutoff = now - 24 * 60 * 60;
+    if miner.chart.first().is_some_and(|sample| sample.at < cutoff) {
+        miner.chart.retain(|sample| sample.at >= cutoff);
+    }
+    thin_chart(&mut miner.chart, now);
+    miner.chart_dirty = true;
+}
+
+/// Keep every poll for 5 minutes, then thin older samples so 24 hours stays small.
+fn thin_chart(samples: &mut Vec<ChartSample>, now: i64) {
+    if samples.len() < 3 {
+        return;
+    }
+    let mut kept = Vec::with_capacity(samples.len());
+    let mut last_at = i64::MIN;
+    let end = samples.len() - 1;
+    for (index, sample) in samples.iter().enumerate() {
+        let age = now.saturating_sub(sample.at);
+        let gap = if age <= 5 * 60 {
+            0
+        } else if age <= 30 * 60 {
+            15
+        } else if age <= 6 * 60 * 60 {
+            60
+        } else {
+            300
+        };
+        if index == end || sample.at.saturating_sub(last_at) >= gap {
+            kept.push(*sample);
+            last_at = sample.at;
+        }
+    }
+    *samples = kept;
+}
+
+fn load_chart(ip: &str) -> Vec<ChartSample> {
+    let Some(text) = bmc_wasm_sdk::kv::get_string(&format!("chart-{ip}")) else {
+        return Vec::new();
+    };
+    let now = SystemTime::now().unix_secs;
+    let mut samples = Vec::new();
+    for part in text.split(';') {
+        let Some((at, hash)) = part.split_once(',') else {
+            continue;
+        };
+        let Ok(at) = at.parse::<i64>() else {
+            continue;
+        };
+        let Ok(hash) = hash.parse::<f32>() else {
+            continue;
+        };
+        if hash.is_finite() && at >= now - 24 * 60 * 60 && at <= now + 120 {
+            samples.push(ChartSample { at, hash });
+        }
+    }
+    thin_chart(&mut samples, now);
+    samples
+}
+
+fn save_chart(ip: &str, samples: &[ChartSample]) {
+    let mut body = String::new();
+    for sample in samples {
+        if !body.is_empty() {
+            body.push(';');
+        }
+        body.push_str(&format!("{},{:.3}", sample.at, sample.hash));
+    }
+    bmc_wasm_sdk::kv::set(&format!("chart-{ip}"), body.as_bytes());
 }
 
 fn apply_http_poll(miner: &mut Miner, text: &str, doc: &JsonDoc) {
@@ -4381,7 +4525,8 @@ fn blank(host: u8, ip: &str) -> Miner {
         voltage: None,
         reachable: false,
         misses: 0,
-        history: Vec::new(),
+        chart: Vec::new(),
+        chart_dirty: false,
     }
 }
 
@@ -4927,22 +5072,152 @@ fn canaan_mode_hint(miner: &Miner) -> &'static str {
     }
 }
 
-fn chart_points(history: &[f64], width: f32, height: f32) -> Vec<(f32, f32)> {
-    if history.len() < 2 {
-        return Vec::new();
+fn chart_window(samples: &[ChartSample], start: i64) -> Vec<ChartSample> {
+    let mut window: Vec<ChartSample> = samples.iter().copied().filter(|sample| sample.at >= start).collect();
+    const MAX_POINTS: usize = 280;
+    if window.len() > MAX_POINTS {
+        let stride = window.len().div_ceil(MAX_POINTS).max(1);
+        let mut thinned = Vec::new();
+        for (index, sample) in window.iter().enumerate() {
+            if index % stride == 0 || index + 1 == window.len() {
+                thinned.push(*sample);
+            }
+        }
+        window = thinned;
     }
-    let min = history.iter().copied().fold(f64::MAX, f64::min);
-    let max = history.iter().copied().fold(f64::MIN, f64::max);
-    let span = (max - min).max(0.001);
-    history
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let x = index as f32 / (history.len() - 1) as f32 * width;
-            let y = height - ((*value - min) / span) as f32 * (height - 8.0) - 4.0;
-            (x, y)
-        })
-        .collect()
+    window
+}
+
+struct ChartStats {
+    min: f64,
+    max: f64,
+    avg: f64,
+    count: usize,
+}
+
+fn chart_plot(samples: &[ChartSample], now: i64, span: i64, width: f32, height: f32, axes: bool) -> (Vec<Draw>, ChartStats) {
+    let start = now.saturating_sub(span.max(1));
+    let window = chart_window(samples, start);
+    let stats = if window.is_empty() {
+        ChartStats { min: 0.0, max: 0.0, avg: 0.0, count: 0 }
+    } else {
+        let mut min = f64::MAX;
+        let mut max = f64::MIN;
+        let mut sum = 0.0;
+        for sample in &window {
+            let value = f64::from(sample.hash);
+            min = min.min(value);
+            max = max.max(value);
+            sum += value;
+        }
+        ChartStats {
+            min,
+            max,
+            avg: sum / window.len() as f64,
+            count: window.len(),
+        }
+    };
+    let left = if axes { 92.0 } else { 0.0 };
+    let bottom = if axes { 26.0 } else { 0.0 };
+    let plot_w = (width - left).max(20.0);
+    let plot_h = (height - bottom).max(20.0);
+    let mut draws = Vec::new();
+    if axes {
+        for step in 0..4 {
+            let y = plot_h * (step as f32 / 3.0);
+            draws.push(path!(
+                vec![(left, y), (left + plot_w, y)],
+                stroke: 1.0,
+                color: Color::from_rgba(255, 255, 255, 50)
+            ));
+        }
+    }
+    if window.len() < 2 {
+        return (draws, stats);
+    }
+    let pad = ((stats.max - stats.min) * 0.12).max(0.05);
+    let low = stats.min - pad;
+    let high = stats.max + pad;
+    let scale = (high - low).max(0.001);
+    let mut mapped = Vec::with_capacity(window.len());
+    for sample in &window {
+        let x = left + (sample.at.saturating_sub(start) as f32 / span as f32).clamp(0.0, 1.0) * plot_w;
+        let y = plot_h - ((f64::from(sample.hash) - low) / scale) as f32 * (plot_h - 8.0) - 4.0;
+        mapped.push((sample.at, x, y));
+    }
+    let break_after = (span / 18).max(120);
+    let mut segment: Vec<(f32, f32)> = Vec::new();
+    let mut flush = |segment: &mut Vec<(f32, f32)>, draws: &mut Vec<Draw>| {
+        if segment.len() < 2 {
+            segment.clear();
+            return;
+        }
+        let mut fill_pts = segment.clone();
+        let first = segment[0];
+        let last = *segment.last().unwrap_or(&first);
+        fill_pts.push((last.0, plot_h));
+        fill_pts.push((first.0, plot_h));
+        draws.push(fill!(
+            fill_pts,
+            color: Color::from_rgba(0, 230, 120, 110)
+        ));
+        let smooth = segment.len() >= 4;
+        let line = Color::from_rgb(120, 255, 170);
+        draws.push(if smooth {
+            path!(segment.clone(), stroke: 4.0, color: line, smooth)
+        } else {
+            path!(segment.clone(), stroke: 4.0, color: line)
+        });
+        segment.clear();
+    };
+    for (index, point) in mapped.iter().enumerate() {
+        if index > 0 && point.0.saturating_sub(mapped[index - 1].0) > break_after {
+            flush(&mut segment, &mut draws);
+        }
+        segment.push((point.1, point.2));
+    }
+    flush(&mut segment, &mut draws);
+    if axes {
+        draws.push(Draw::text(
+            0.0,
+            0.0,
+            format_hashrate(Some(stats.max)),
+            style!(size: 14, weight: FontWeight::SEMIBOLD, color: WHITE),
+        ));
+        draws.push(Draw::text(
+            0.0,
+            (plot_h - 18.0).max(0.0),
+            format_hashrate(Some(stats.min)),
+            style!(size: 14, weight: FontWeight::SEMIBOLD, color: WHITE),
+        ));
+        let marks = [
+            (start, left, TextAlign::Left),
+            (start + span / 2, left + plot_w * 0.5, TextAlign::Center),
+            (now, left + plot_w, TextAlign::Right),
+        ];
+        for (mark, x, align) in marks {
+            draws.push(Draw::text(
+                x,
+                plot_h + 4.0,
+                chart_clock(mark, span >= 12 * 60 * 60),
+                style!(size: 14, weight: FontWeight::SEMIBOLD, color: WHITE, align: align),
+            ));
+        }
+    }
+    (draws, stats)
+}
+
+fn chart_clock(unix: i64, with_day: bool) -> String {
+    let snap = bmc_wasm_sdk::system::current();
+    let tz = snap.timezone().unwrap_or("Etc/GMT");
+    let local = bmc_wasm_sdk::calendar::tz_convert(unix, tz).unwrap_or_else(|| SystemTime { unix_secs: unix }.utc());
+    let hour = if local.hour % 12 == 0 { 12 } else { local.hour % 12 };
+    let suffix = if local.hour < 12 { "AM" } else { "PM" };
+    if with_day {
+        format!("{} {hour}:{:02} {suffix}", local.month_short(), local.minute)
+    } else {
+        format!("{hour}:{:02} {suffix}", local.minute)
+    }
 }
 
 fn hash_metric(sha: &str, zec: Option<&str>, width: f32, height: f32) -> Node {
@@ -9131,13 +9406,9 @@ fn pool_card(miner: &Miner, width: f32, height: f32) -> Node {
 
 fn chart_card(miner: &Miner, width: f32, height: f32) -> Node {
     let plot_w = (width - 28.0).max(40.0);
-    let plot_h = (height - 46.0).max(36.0);
-    let points = chart_points(&miner.history, plot_w, plot_h);
-    let line = if points.len() >= 2 {
-        path!(points, stroke: 3.0, color: EMERALD, smooth)
-    } else {
-        path!(vec![(0.0, plot_h * 0.5), (plot_w, plot_h * 0.5)], stroke: 2.0, color: MUTED)
-    };
+    let plot_h = (height - 62.0).max(36.0);
+    let now = SystemTime::now().unix_secs;
+    let (draws, _) = chart_plot(&miner.chart, now, 15 * 60, plot_w, plot_h, false);
     col(
         props!(
             width: width,
@@ -9155,10 +9426,144 @@ fn chart_card(miner: &Miner, width: f32, height: f32) -> Node {
                 style!(size: 20, weight: FontWeight::SEMIBOLD, color: WHITE, line_height: 1.0),
             ),
             text(
-                display_hashrate(miner),
+                format!("{}   ·   15 min", display_hashrate(miner)),
                 style!(size: 16, color: MUTED, line_height: 1.0),
             ),
-            canvas(props!(width: plot_w, height: plot_h), [line]),
+            canvas(props!(width: plot_w, height: plot_h), draws),
+            touchable(
+                "chart-open",
+                props!(inset_top: 0.0, inset_right: 0.0, inset_bottom: 0.0, inset_left: 0.0),
+                Vec::<Draw>::new(),
+            ),
+        ],
+    )
+}
+
+fn chart_screen(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
+    let height = screen_h(height);
+    let pad = 16.0;
+    let inner = (width - pad * 2.0).max(100.0);
+    let span_index = (app.chart_span as usize).min(CHART_SPANS.len() - 1);
+    let (span, label) = CHART_SPANS[span_index];
+    let now = SystemTime::now().unix_secs;
+    let header_h = 52.0;
+    let range_h = 48.0;
+    let stats_h = 28.0;
+    let gap = 8.0;
+    let plot_h = (height - pad * 2.0 - header_h - range_h - stats_h - gap * 3.0).max(120.0);
+    let plot_pad = 10.0;
+    let (draws, stats) = chart_plot(
+        &miner.chart,
+        now,
+        span,
+        (inner - plot_pad * 2.0).max(40.0),
+        (plot_h - plot_pad * 2.0).max(40.0),
+        true,
+    );
+    let summary = if stats.count == 0 {
+        "Collecting hashrate from miner polls".to_owned()
+    } else {
+        format!(
+            "{label}    min {}    avg {}    max {}    {} samples",
+            format_hashrate(Some(stats.min)),
+            format_hashrate(Some(stats.avg)),
+            format_hashrate(Some(stats.max)),
+            stats.count
+        )
+    };
+    let gap_count = 7.0;
+    let chip_w = ((inner - gap * gap_count) / CHART_SPANS.len() as f32).max(40.0);
+    let chips: Vec<Node> = CHART_SPANS
+        .iter()
+        .enumerate()
+        .map(|(index, (_, name))| range_chip(&format!("span-{index}"), name, index == span_index, chip_w))
+        .collect();
+    with_theme(
+        width,
+        height,
+        col(
+            props!(background: TRANSPARENT, width: width, height: height, padding: pad, gap: gap),
+            [
+                row(
+                    props!(
+                        height: header_h,
+                        justify_content: Justify::SpaceBetween,
+                        cross_align: CrossAlign::Center,
+                    ),
+                    [
+                        row(
+                            props!(gap: 10.0, cross_align: CrossAlign::Center),
+                            [
+                                back_button("back"),
+                                clipped(
+                                    format!("{}  |  {}", miner_title(miner), miner.ip),
+                                    22,
+                                    FontWeight::BOLD,
+                                    WHITE,
+                                    (inner - 420.0).max(80.0),
+                                ),
+                            ],
+                        ),
+                        text(
+                            display_hashrate(miner),
+                            style!(size: 28, weight: FontWeight::BOLD, color: EMERALD, line_height: 1.0),
+                        ),
+                    ],
+                ),
+                row(props!(height: range_h, gap: gap), chips),
+                text(
+                    summary,
+                    style!(size: 16, weight: FontWeight::SEMIBOLD, color: MUTED, line_height: 1.0),
+                ),
+                col(
+                    props!(
+                        width: inner,
+                        height: plot_h,
+                        background: Color::from_rgb(64, 64, 64),
+                        border_radius: 12.0,
+                        padding: plot_pad,
+                    ),
+                    [canvas(
+                        props!(
+                            width: (inner - plot_pad * 2.0).max(40.0),
+                            height: (plot_h - plot_pad * 2.0).max(40.0),
+                        ),
+                        draws,
+                    )],
+                ),
+            ],
+        ),
+    )
+}
+
+fn range_chip(id: &str, label: &str, selected: bool, width: f32) -> Node {
+    col(
+        props!(
+            width: width,
+            height: 48.0,
+            background: if selected { Color::from_hex(0x14_3A_24) } else { Color::from_hex(0x1C_2E_24) },
+            border_radius: 10.0,
+            border_width: 1.5,
+            border_color: if selected { EMERALD } else { Color::from_hex(0x3E_6B_50) },
+            justify_content: Justify::Center,
+            cross_align: CrossAlign::Center,
+        ),
+        [
+            text(
+                label,
+                style!(
+                    size: 16,
+                    weight: FontWeight::SEMIBOLD,
+                    color: if selected { EMERALD } else { WHITE },
+                    line_height: 1.0,
+                    align: TextAlign::Center,
+                ),
+            ),
+            touchable(
+                id,
+                props!(inset_top: 0.0, inset_right: 0.0, inset_bottom: 0.0, inset_left: 0.0),
+                Vec::<Draw>::new(),
+            ),
         ],
     )
 }
@@ -10030,6 +10435,7 @@ pub extern "C" fn render(delta_ms: u32) {
         let mut app = slot.borrow_mut();
         // Settings keeps the LEDs running and ignores miner polls, scans,
         // weather, and share animations so a scroll is not rebuilding that work.
+        app.flush_charts(false);
         let paused = app.settings;
         if !paused {
             app.maintain_hash_order(delta_ms);
@@ -10106,6 +10512,9 @@ pub extern "C" fn render(delta_ms: u32) {
         }
         if let Some(ip) = app.selected.clone() {
             if let Some(miner) = app.miners.iter().find(|miner| miner.ip == ip).cloned() {
+                if app.chart_open {
+                    return chart_screen(&miner, &app, width, height);
+                }
                 return dashboard(&miner, &app, width, height);
             }
         }
