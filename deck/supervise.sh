@@ -1,5 +1,6 @@
 #!/bin/sh
 # Keep Tailscale in userspace on the Deck and replace the login URL when it expires.
+# /etc/rc.local must start this script before its exit 0. A line after exit 0 never runs.
 DIR=/mnt/data/tailscale
 SOCK=$DIR/tailscaled.sock
 TS=$DIR/tailscale
