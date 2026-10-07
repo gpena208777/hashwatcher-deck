@@ -7,6 +7,12 @@ stop|start|restart|relogin|reset)
 	printf '%s\n' "$cmd" > /mnt/data/tailscale/cmd
 	printf '{"ok":true,"cmd":"%s"}\n' "$cmd"
 	;;
+update)
+	# Return immediately. The download and restart continue after this process exits.
+	printf '{"ok":true,"cmd":"update"}\n'
+	trap '' HUP
+	/mnt/data/tailscale/www/cgi-bin/update-widget >>/mnt/data/hashwatcher-update.log 2>&1 &
+	;;
 *)
 	printf '{"ok":false}\n'
 	;;

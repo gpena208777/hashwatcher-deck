@@ -1,0 +1,53 @@
+#!/bin/sh
+# Install a newer HashWatcher widget published on GitHub, then restart it.
+# Only accepts the wasm named by deck/release.json on the HashWatcher Deck repo.
+trap '' HUP
+LOCK=/tmp/hashwatcher-update.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+	exit 0
+fi
+trap 'rmdir "$LOCK"' EXIT
+
+manifest=$(wget -q -O - -T 25 -U HashWatcher-Deck \
+	https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck/release.json) || exit 1
+version=$(printf '%s' "$manifest" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+url=$(printf '%s' "$manifest" | sed -n 's/.*"wasm"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+case "$version" in
+''|*[!0-9.]*) exit 1 ;;
+esac
+case "$url" in
+https://github.com/gpena208777/hashwatcher-deck/releases/download/v"$version"/hashwatcher.wasm) ;;
+*) exit 1 ;;
+esac
+
+installed=$(cat /mnt/data/bmc/widgets/hashwatcher/version 2>/dev/null || true)
+if [ -n "$installed" ]; then
+	newer=$(awk -v remote="$version" -v local="$installed" 'BEGIN {
+		split(remote, r, "."); split(local, l, ".");
+		for (i = 1; i <= 3; i++) {
+			if (r[i] + 0 > l[i] + 0) { print 1; exit }
+			if (r[i] + 0 < l[i] + 0) { print 0; exit }
+		}
+		print 0
+	}')
+	[ "$newer" = 1 ] || exit 0
+fi
+
+tmp=/tmp/hashwatcher.wasm.new
+rm -f "$tmp"
+wget -q -O "$tmp" -T 90 -U HashWatcher-Deck "$url" || exit 1
+printf '\0asm' > /tmp/hashwatcher.wasm.magic
+head -c 4 "$tmp" | cmp -s - /tmp/hashwatcher.wasm.magic || exit 1
+
+wasm=/mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm
+live=$(ps -o args 2>/dev/null | sed -n 's/.*--wasm \([^ ]*hashwatcher\.wasm\).*/\1/p' | head -n 1)
+case "$live" in
+/mnt/*hashwatcher.wasm) wasm=$live ;;
+esac
+cp "$tmp" "$wasm" || exit 1
+mkdir -p /mnt/data/bmc/widgets/hashwatcher
+printf '%s\n' "$version" > /mnt/data/bmc/widgets/hashwatcher/version
+pid=$(ps -o pid,args 2>/dev/null | awk '/hashwatcher\.wasm/ && !/awk/ { print $1; exit }')
+if [ -n "$pid" ]; then
+	kill "$pid" || true
+fi

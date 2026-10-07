@@ -69,7 +69,22 @@ const GEAR_ICON: Bitmap = include_bitmap!("assets/gear.png");
 const DOWNLOAD_QR: Bitmap = include_bitmap!("assets/hashwatcher-qr.png");
 const SUPPORT_QR: Bitmap = include_bitmap!("assets/support-qr.png");
 /// Deck settings release. Bump this on each update. The support QR emails the same value.
-const DECK_VERSION: &str = "1.0.0";
+const DECK_VERSION: &str = "1.0.1";
+/// First look is a minute after start, then once an hour. Outbound Data must be on.
+const UPDATE_FIRST_MS: u32 = 60_000;
+const UPDATE_EVERY_MS: u32 = 3_600_000;
+const RELEASE_URL: &str = "https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck/release.json";
+
+fn version_is_newer(remote: &str, local: &str) -> bool {
+    let parse = |text: &str| -> [u32; 3] {
+        let mut parts = [0u32; 3];
+        for (index, part) in text.trim().trim_start_matches('v').split('.').take(3).enumerate() {
+            parts[index] = part.parse().unwrap_or(0);
+        }
+        parts
+    };
+    parse(remote) > parse(local)
+}
 /// Shared settings-button chrome. Idle and selected are the only two faces.
 /// Each button still has its own label and click id.
 const SETTINGS_BUTTON: NinePatchAsset = include_nine_patch!("assets/settings-button.9.png");
@@ -287,6 +302,9 @@ struct App {
     tailscale_expiry: String,
     tailscale_admin: String,
     tailscale_cmd: Option<u32>,
+    update_wait_ms: u32,
+    update_checked: bool,
+    update_fetch: Option<u32>,
     /// Screen state to keep after a tap until status.json catches up.
     tailscale_hold: String,
     tailscale_hold_ms: u32,
@@ -541,6 +559,9 @@ impl App {
             tailscale_expiry: String::new(),
             tailscale_admin: String::new(),
             tailscale_cmd: None,
+            update_wait_ms: 0,
+            update_checked: false,
+            update_fetch: None,
             tailscale_hold: String::new(),
             tailscale_hold_ms: 0,
             settings_page: 0,
@@ -1612,6 +1633,11 @@ impl App {
         if self.weather_fetch == Some(response.request_id.to_wire()) {
             self.weather_fetch = None;
             self.finish_weather(response);
+            return;
+        }
+        if self.update_fetch == Some(response.request_id.to_wire()) {
+            self.update_fetch = None;
+            self.finish_update_check(response);
             return;
         }
         let Some(probe) = self.inflight.remove(&response.request_id.to_wire()) else {
@@ -3297,6 +3323,43 @@ impl App {
                 let _ = cancel(id);
             }
         }
+    }
+
+    fn maybe_check_update(&mut self, delta_ms: u32) {
+        if !self.outbound || self.update_fetch.is_some() {
+            return;
+        }
+        self.update_wait_ms = self.update_wait_ms.saturating_add(delta_ms.min(2_000));
+        let due = if self.update_checked { UPDATE_EVERY_MS } else { UPDATE_FIRST_MS };
+        if self.update_wait_ms < due {
+            return;
+        }
+        self.update_wait_ms = 0;
+        self.update_checked = true;
+        let Some(id) = FetchRequest::get(RELEASE_URL)
+            .headers("User-Agent: HashWatcher-Deck")
+            .timeout(Duration::from_millis(8_000))
+            .send(on_fetch)
+        else {
+            self.update_wait_ms = due.saturating_sub(15_000);
+            return;
+        };
+        self.update_fetch = Some(id.to_wire());
+    }
+
+    fn finish_update_check(&mut self, response: &FetchResponse) {
+        if !response.ok() {
+            return;
+        }
+        let Some(version) = response.json().str("/version") else {
+            return;
+        };
+        if !version_is_newer(&version, DECK_VERSION) {
+            return;
+        }
+        let _ = FetchRequest::get("http://127.0.0.1:9418/cgi-bin/action?update")
+            .timeout(Duration::from_millis(2_000))
+            .send(on_fetch);
     }
 
     fn maybe_fetch_weather(&mut self) {
@@ -6919,8 +6982,8 @@ fn settings_frame(title: &str, back_id: &str, width: f32, height: f32, body: Nod
                                     style!(size: 28, weight: FontWeight::BOLD, family: FontFamily::DeckSans, color: WHITE, line_height: 1.0),
                                 ),
                                 text(
-                                    DECK_VERSION,
-                                    style!(size: 18, weight: FontWeight::SEMIBOLD, color: LABEL, line_height: 1.0),
+                                    format!("v{DECK_VERSION}"),
+                                    style!(size: 18, weight: FontWeight::SEMIBOLD, color: EMERALD, line_height: 1.0),
                                 ),
                             ],
                         ),
@@ -9441,18 +9504,17 @@ fn chart_card(miner: &Miner, width: f32, height: f32) -> Node {
 
 fn chart_screen(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
     let height = screen_h(height);
-    let pad = 16.0;
+    let pad = 8.0;
     let inner = (width - pad * 2.0).max(100.0);
     let span_index = (app.chart_span as usize).min(CHART_SPANS.len() - 1);
-    let (span, label) = CHART_SPANS[span_index];
+    let (span, _) = CHART_SPANS[span_index];
     let now = SystemTime::now().unix_secs;
     let header_h = 52.0;
     let range_h = 48.0;
-    let stats_h = 28.0;
-    let gap = 8.0;
-    let plot_h = (height - pad * 2.0 - header_h - range_h - stats_h - gap * 3.0).max(120.0);
+    let gap = 4.0;
+    let plot_h = (height - pad * 2.0 - header_h - range_h - gap * 2.0).max(120.0);
     let plot_pad = 10.0;
-    let (draws, stats) = chart_plot(
+    let (draws, _) = chart_plot(
         &miner.chart,
         now,
         span,
@@ -9460,19 +9522,8 @@ fn chart_screen(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
         (plot_h - plot_pad * 2.0).max(40.0),
         true,
     );
-    let summary = if stats.count == 0 {
-        "Collecting hashrate from miner polls".to_owned()
-    } else {
-        format!(
-            "{label}    min {}    avg {}    max {}    {} samples",
-            format_hashrate(Some(stats.min)),
-            format_hashrate(Some(stats.avg)),
-            format_hashrate(Some(stats.max)),
-            stats.count
-        )
-    };
     let gap_count = 7.0;
-    let chip_w = ((inner - gap * gap_count) / CHART_SPANS.len() as f32).max(40.0);
+    let chip_w = ((inner - 8.0 * gap_count) / CHART_SPANS.len() as f32).max(40.0);
     let chips: Vec<Node> = CHART_SPANS
         .iter()
         .enumerate()
@@ -9510,11 +9561,7 @@ fn chart_screen(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
                         ),
                     ],
                 ),
-                row(props!(height: range_h, gap: gap), chips),
-                text(
-                    summary,
-                    style!(size: 16, weight: FontWeight::SEMIBOLD, color: MUTED, line_height: 1.0),
-                ),
+                row(props!(height: range_h, gap: 8.0), chips),
                 col(
                     props!(
                         width: inner,
@@ -10493,6 +10540,7 @@ pub extern "C" fn render(delta_ms: u32) {
                 app.saver_on = true;
             }
         }
+        app.maybe_check_update(delta_ms);
         matches!(app.phase, Phase::Http | Phase::Tcp)
     });
 
