@@ -234,7 +234,8 @@ struct App {
     page: usize,
     message: String,
     notice: String,
-    /// How long a "Setting hashrate target" line stays on screen.
+    /// Yellow status line. It clears itself after `notice_ms`.
+    notice_seen: String,
     notice_ms: u32,
     led_label: String,
     /// Last phone `led=` value already applied. A repeat must not turn the strip off again.
@@ -536,6 +537,7 @@ impl App {
             page: 0,
             message: "Looking for the Deck network".to_owned(),
             notice: String::new(),
+            notice_seen: String::new(),
             notice_ms: 0,
             led_label: "Ready".to_owned(),
             led_remote: String::new(),
@@ -3586,9 +3588,6 @@ impl App {
         };
         if self.send_braiins(miner, path, &body, &notice) {
             self.remember_tune_sent(&miner.ip, index as u8);
-            if notice.starts_with("Setting hashrate target") || notice.starts_with("Setting power target") {
-                self.notice_ms = 2_000;
-            }
         }
     }
 
@@ -11280,13 +11279,17 @@ pub extern "C" fn render(delta_ms: u32) {
             if app.share_flash_ms > 0 {
                 app.share_flash_ms = app.share_flash_ms.saturating_sub(delta_ms);
             }
-            if app.notice_ms > 0 {
+            if app.notice.is_empty() {
+                app.notice_ms = 0;
+                app.notice_seen.clear();
+            } else if app.notice != app.notice_seen {
+                app.notice_seen = app.notice.clone();
+                app.notice_ms = 2_000;
+            } else if app.notice_ms > 0 {
                 app.notice_ms = app.notice_ms.saturating_sub(delta_ms);
-                if app.notice_ms == 0
-                    && (app.notice.starts_with("Setting hashrate target")
-                        || app.notice.starts_with("Setting power target"))
-                {
+                if app.notice_ms == 0 {
                     app.notice.clear();
+                    app.notice_seen.clear();
                 }
             }
             if app.phase == Phase::Live
