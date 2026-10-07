@@ -69,7 +69,7 @@ const GEAR_ICON: Bitmap = include_bitmap!("assets/gear.png");
 const DOWNLOAD_QR: Bitmap = include_bitmap!("assets/hashwatcher-qr.png");
 const SUPPORT_QR: Bitmap = include_bitmap!("assets/support-qr.png");
 /// Deck settings release. Bump this on each update. The support QR emails the same value.
-const DECK_VERSION: &str = "1.0.1";
+const DECK_VERSION: &str = "1.0.2";
 /// First look is a minute after start, then once an hour. Outbound Data must be on.
 const UPDATE_FIRST_MS: u32 = 60_000;
 const UPDATE_EVERY_MS: u32 = 3_600_000;
