@@ -69,7 +69,7 @@ const GEAR_ICON: Bitmap = include_bitmap!("assets/gear.png");
 const DOWNLOAD_QR: Bitmap = include_bitmap!("assets/hashwatcher-qr.png");
 const SUPPORT_QR: Bitmap = include_bitmap!("assets/support-qr.png");
 /// Deck settings release. Bump this on each update. The support QR emails the same value.
-const DECK_VERSION: &str = "1.0.2";
+const DECK_VERSION: &str = "1.0.3";
 /// First look is a minute after start, then once an hour. Outbound Data must be on.
 const UPDATE_FIRST_MS: u32 = 60_000;
 const UPDATE_EVERY_MS: u32 = 3_600_000;
@@ -181,12 +181,41 @@ impl Default for Weather {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaverMode {
+    Clock,
+    Weather,
+    Neural,
+}
+
+impl SaverMode {
+    fn parse(text: &str) -> Self {
+        if text.eq_ignore_ascii_case("weather") {
+            Self::Weather
+        } else if text.eq_ignore_ascii_case("neural") {
+            Self::Neural
+        } else {
+            Self::Clock
+        }
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Clock => "clock",
+            Self::Weather => "weather",
+            Self::Neural => "neural",
+        }
+    }
+}
+
 struct App {
     prefix: String,
     own: Option<u8>,
     queue: VecDeque<Probe>,
     inflight: HashMap<u32, Probe>,
     tcp_queue: VecDeque<u8>,
+    /// Follow-up reads (estats, temps, pools). They wait until a socket is free.
+    follow_queue: VecDeque<(u8, &'static [u8])>,
     sockets: HashMap<u32, SocketJob>,
     miners: Vec<Miner>,
     finished: u16,
@@ -196,9 +225,17 @@ struct App {
     chart_open: bool,
     chart_span: u8,
     chart_saved: i64,
+    /// Open read of one Braiins miner's chart history.
+    chart_pull: Option<ChartPull>,
+    chart_ip: String,
+    chart_window: u8,
+    /// Unix time before the next history read for `chart_ip`.
+    chart_next: i64,
     page: usize,
     message: String,
     notice: String,
+    /// How long a "Setting hashrate target" line stays on screen.
+    notice_ms: u32,
     led_label: String,
     /// Last phone `led=` value already applied. A repeat must not turn the strip off again.
     led_remote: String,
@@ -240,7 +277,7 @@ struct App {
     hash_order_ms: u32,
     hash_order_seeded: bool,
     saver_ms: u32,
-    saver_weather: bool,
+    saver_mode: SaverMode,
     /// Internet fetches. Used only for weather data.
     outbound: bool,
     weather_f: bool,
@@ -432,9 +469,11 @@ struct Miner {
     voltage: Option<f64>,
     reachable: bool,
     misses: u8,
-    /// Hashrate samples from background polls, newest last. Kept for 24 hours.
+    /// Hashrate samples, newest last. Braiins history replaces poll samples.
     chart: Vec<ChartSample>,
     chart_dirty: bool,
+    /// The chart came from the miner's history stream, so polls must not thin it.
+    chart_remote: bool,
     /// Current Harlo-OS is /api/telemetry. Older firmware stays on /api/v1/status.
     harlo_legacy: bool,
 }
@@ -456,6 +495,22 @@ const CHART_SPANS: [(i64, &str); 8] = [
     (24 * 60 * 60, "24 hours"),
 ];
 
+/// Windows the Braiins miner actually returns. Index + 1 is `window_length`.
+const BRAIINS_CHART_SPANS: [(i64, &str); 4] = [
+    (10 * 60, "10 min"),
+    (3 * 60 * 60, "3 hours"),
+    (24 * 60 * 60, "24 hours"),
+    (7 * 24 * 60 * 60, "7 days"),
+];
+
+struct ChartPull {
+    socket: Socket,
+    ip: String,
+    window: u8,
+    raw: Vec<u8>,
+    started: i64,
+}
+
 impl App {
     fn new() -> Self {
         Self {
@@ -464,6 +519,7 @@ impl App {
             queue: VecDeque::new(),
             inflight: HashMap::new(),
             tcp_queue: VecDeque::new(),
+            follow_queue: VecDeque::new(),
             sockets: HashMap::new(),
             miners: Vec::new(),
             finished: 0,
@@ -473,9 +529,14 @@ impl App {
             chart_open: false,
             chart_span: 0,
             chart_saved: 0,
+            chart_pull: None,
+            chart_ip: String::new(),
+            chart_window: 0,
+            chart_next: 0,
             page: 0,
             message: "Looking for the Deck network".to_owned(),
             notice: String::new(),
+            notice_ms: 0,
             led_label: "Ready".to_owned(),
             led_remote: String::new(),
             led_rgb: (0, 204, 102),
@@ -514,7 +575,7 @@ impl App {
             hash_order_ms: 0,
             hash_order_seeded: false,
             saver_ms: 0,
-            saver_weather: false,
+            saver_mode: SaverMode::Clock,
             outbound: true,
             weather_f: false,
             saver_on: false,
@@ -592,7 +653,7 @@ impl App {
             }
         }
         if let Some(text) = bmc_wasm_sdk::kv::get_string("saver_mode") {
-            self.saver_weather = text == "weather";
+            self.saver_mode = SaverMode::parse(&text);
         }
         if let Some(text) = bmc_wasm_sdk::kv::get_string("outbound") {
             self.outbound = text != "0";
@@ -667,7 +728,7 @@ impl App {
         bmc_wasm_sdk::kv::set("saver_ms", self.saver_ms.to_string().as_bytes());
         bmc_wasm_sdk::kv::set(
             "saver_mode",
-            if self.saver_weather { b"weather" } else { b"clock" },
+            self.saver_mode.wire().as_bytes(),
         );
         bmc_wasm_sdk::kv::set("outbound", if self.outbound { b"1" } else { b"0" });
         bmc_wasm_sdk::kv::set("place", self.place.as_bytes());
@@ -706,6 +767,7 @@ impl App {
         self.cancel_work();
         self.queue.clear();
         self.tcp_queue.clear();
+        self.follow_queue.clear();
         let info = bmc_wasm_sdk::network::info();
         if let Some((prefix, own)) = split_v4(&info.ip) {
             self.prefix = prefix;
@@ -755,6 +817,7 @@ impl App {
                 record.misses = existing.misses;
                 record.chart = existing.chart.clone();
                 record.chart_dirty = existing.chart_dirty;
+                record.chart_remote = existing.chart_remote;
                 record.harlo_legacy = existing.harlo_legacy;
                 if record.model.is_empty() {
                     record.model = existing.model.clone();
@@ -903,7 +966,7 @@ impl App {
                         self.saver_on = false;
                     }
                 }
-                "mode" => self.saver_weather = value.eq_ignore_ascii_case("weather"),
+                "mode" => self.saver_mode = SaverMode::parse(value),
                 "led" => led = Some(value.to_owned()),
                 "cols" => self.apply_summary_cols(value),
                 "city" => city = Some(value.trim().to_owned()),
@@ -1148,10 +1211,15 @@ impl App {
             self.phase = Phase::Tcp;
             self.message = "Checking CGMiner port 4028".to_owned();
         }
-        if self.phase == Phase::Tcp && self.tcp_queue.is_empty() && self.sockets.is_empty() {
+        if self.phase == Phase::Tcp
+            && self.tcp_queue.is_empty()
+            && self.follow_queue.is_empty()
+            && self.sockets.is_empty()
+        {
             self.phase = Phase::Live;
             self.message = format!("{} miners", self.miners.len());
             self.enqueue_polls();
+            self.fill_sockets();
         }
         self.release_shares();
     }
@@ -1160,29 +1228,68 @@ impl App {
         if self.phase != Phase::Tcp && self.phase != Phase::Live {
             return;
         }
+        let summary_waiting = self.tcp_queue.len();
+        let follow_waiting = self.follow_queue.len();
+        let mut summaries_seen = 0;
+        let mut follows_seen = 0;
+        let mut skipped_summaries = Vec::new();
+        let mut skipped_follows = Vec::new();
         while self.sockets.len() < MAX_SOCKETS {
-            let Some(host) = self.tcp_queue.pop_front() else {
-                break;
-            };
-            let ip = self.ip(host);
-            let Some(socket) = socket::tcp_connect(&ip, 4028, on_socket) else {
-                self.tcp_queue.push_front(host);
-                break;
-            };
-            self.sockets.insert(
-                socket.0.to_wire(),
-                SocketJob {
-                    host,
-                    started: TICK.get(),
+            if summaries_seen < summary_waiting {
+                let Some(host) = self.tcp_queue.pop_front() else {
+                    break;
+                };
+                summaries_seen += 1;
+                if self.sockets.values().any(|job| job.host == host) {
+                    skipped_summaries.push(host);
+                    continue;
+                }
+                if !self.open_read(host, &[]) {
+                    self.tcp_queue.push_front(host);
+                    break;
+                }
+                continue;
+            }
+            if follows_seen < follow_waiting {
+                let Some((host, command)) = self.follow_queue.pop_front() else {
+                    break;
+                };
+                follows_seen += 1;
+                if self.sockets.values().any(|job| job.host == host) {
+                    skipped_follows.push((host, command));
+                    continue;
+                }
+                if !self.open_read(host, command) {
+                    self.follow_queue.push_front((host, command));
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.tcp_queue.extend(skipped_summaries);
+        self.follow_queue.extend(skipped_follows);
+    }
+
+    fn open_read(&mut self, host: u8, command: &[u8]) -> bool {
+        let ip = self.ip(host);
+        let Some(socket) = socket::tcp_connect(&ip, 4028, on_socket) else {
+            return false;
+        };
+        self.sockets.insert(
+            socket.0.to_wire(),
+            SocketJob {
+                host,
+                started: TICK.get(),
                 connected: false,
                 poll: true,
                 control: false,
-                payload: Vec::new(),
+                payload: command.to_vec(),
                 buf: Vec::new(),
                 socket,
             },
         );
-    }
+        true
     }
 
     fn url_for(&self, probe: &Probe) -> String {
@@ -1456,7 +1563,7 @@ impl App {
             format!("beep={}", if self.share_sound { "1" } else { "0" }),
             format!("unit={}", if self.weather_f { "f" } else { "c" }),
             format!("saver={}", self.saver_ms / 1_000),
-            format!("mode={}", if self.saver_weather { "weather" } else { "clock" }),
+            format!("mode={}", self.saver_mode.wire()),
             format!("led={led}"),
             format!("cols={cols}"),
             format!("city={city}"),
@@ -1836,8 +1943,137 @@ impl App {
         }
     }
 
+    fn pump_charts(&mut self) {
+        if self.settings || self.saver_on {
+            return;
+        }
+        let Some(ip) = self.selected.clone() else {
+            return;
+        };
+        let braiins = self
+            .miners
+            .iter()
+            .any(|miner| miner.ip == ip && miner.family == "braiins");
+        if !braiins {
+            self.stop_chart_pull();
+            return;
+        }
+        let window = braiins_graph_window(self.chart_span as usize);
+        let now = SystemTime::now().unix_secs;
+        let pull_state = self.chart_pull.as_ref().map(|pull| {
+            (
+                pull.ip == ip && pull.window == window,
+                now.saturating_sub(pull.started) < 8,
+            )
+        });
+        if pull_state == Some((true, true)) {
+            return;
+        }
+        if pull_state.is_some() {
+            let stale = self.chart_pull.take().expect("chart pull");
+            let same = stale.ip == ip && stale.window == window;
+            let (samples, _) = graph_samples(&stale.raw).unwrap_or((Vec::new(), true));
+            stale.socket.close();
+            if same {
+                self.finish_graph(&ip, window, samples);
+                return;
+            }
+        }
+        let fresh = self.chart_ip == ip && self.chart_window == window && now < self.chart_next;
+        let have_remote = self
+            .miners
+            .iter()
+            .any(|miner| miner.ip == ip && miner.chart_remote && !miner.chart.is_empty());
+        if fresh && have_remote {
+            return;
+        }
+        let Some(sock) = socket::tcp_connect(&ip, 80, on_socket) else {
+            self.chart_ip = ip;
+            self.chart_window = window;
+            self.chart_next = now + 20;
+            return;
+        };
+        self.chart_pull = Some(ChartPull {
+            socket: sock,
+            ip,
+            window,
+            raw: Vec::new(),
+            started: now,
+        });
+    }
+
+    fn stop_chart_pull(&mut self) {
+        if let Some(pull) = self.chart_pull.take() {
+            pull.socket.close();
+        }
+    }
+
+    fn handle_chart_socket(&mut self, socket: Socket, event: &SocketEvent<'_>) {
+        match event {
+            SocketEvent::Connected => {
+                let Some(pull) = &self.chart_pull else {
+                    return;
+                };
+                let request = graph_request(&pull.ip, pull.window);
+                socket.write(&request);
+            }
+            SocketEvent::Data(data) => {
+                let Some(pull) = self.chart_pull.as_mut() else {
+                    return;
+                };
+                pull.raw.extend_from_slice(data);
+                if pull.raw.len() > 256 * 1024 {
+                    pull.raw.truncate(256 * 1024);
+                }
+                let raw = pull.raw.clone();
+                let ip = pull.ip.clone();
+                let window = pull.window;
+                let Some((samples, done)) = graph_samples(&raw) else {
+                    return;
+                };
+                if !done && samples.len() < 300 {
+                    return;
+                }
+                self.chart_pull = None;
+                self.finish_graph(&ip, window, samples);
+                socket.close();
+            }
+            SocketEvent::Closed(_) => {
+                let Some(pull) = self.chart_pull.take() else {
+                    return;
+                };
+                if pull.socket.0.to_wire() != socket.0.to_wire() {
+                    self.chart_pull = Some(pull);
+                    return;
+                }
+                let (samples, _) = graph_samples(&pull.raw).unwrap_or((Vec::new(), true));
+                self.finish_graph(&pull.ip, pull.window, samples);
+            }
+        }
+    }
+
+    fn finish_graph(&mut self, ip: &str, window: u8, samples: Vec<ChartSample>) {
+        let now = SystemTime::now().unix_secs;
+        self.chart_ip = ip.to_owned();
+        self.chart_window = window;
+        self.chart_next = now + braiins_graph_refresh(window);
+        if samples.is_empty() {
+            self.chart_next = now + 20;
+            return;
+        }
+        if let Some(miner) = self.miners.iter_mut().find(|miner| miner.ip == ip) {
+            miner.chart = samples;
+            miner.chart_remote = true;
+            miner.chart_dirty = true;
+        }
+    }
+
     fn handle_socket(&mut self, socket: Socket, event: &SocketEvent<'_>) {
         let id = socket.0.to_wire();
+        if self.chart_pull.as_ref().is_some_and(|pull| pull.socket.0.to_wire() == id) {
+            self.handle_chart_socket(socket, event);
+            return;
+        }
         if self.sound_socket.is_some_and(|sound| sound.0.to_wire() == id) {
             match event {
                 SocketEvent::Connected => {
@@ -1958,8 +2194,9 @@ impl App {
             job.socket.close();
         }
         if let Some(command) = follow {
-            self.open_aux_socket(host, command);
+            self.enqueue_follow(host, command);
         }
+        self.fill_sockets();
     }
 
     fn reap_sockets(&mut self) {
@@ -1967,13 +2204,15 @@ impl App {
         let stale: Vec<u32> = self
             .sockets
             .iter()
-            .filter(|(_, job)| {
-                let stale = now.saturating_sub(job.started) >= SOCKET_TICKS;
-                stale && (!job.connected || job.buf.is_empty())
-            })
+            .filter(|(_, job)| now.saturating_sub(job.started) >= SOCKET_TICKS)
             .map(|(id, _)| *id)
             .collect();
         for id in stale {
+            let ready = self.sockets.get(&id).is_some_and(|job| frame_ready(&job.buf));
+            if ready {
+                self.finish_socket_buffer(id);
+                continue;
+            }
             if let Some(job) = self.sockets.remove(&id) {
                 if job.poll && job.payload.is_empty() && !job.control {
                     if let Some(miner) = self.miners.iter_mut().find(|miner| miner.host == job.host) {
@@ -1985,30 +2224,18 @@ impl App {
         }
     }
 
-    fn open_aux_socket(&mut self, host: u8, command: &'static [u8]) {
-        if self.sockets.len() >= MAX_SOCKETS {
-            return;
+    fn enqueue_follow(&mut self, host: u8, command: &'static [u8]) {
+        let pending = self
+            .follow_queue
+            .iter()
+            .any(|(queued, cmd)| *queued == host && *cmd == command);
+        let inflight = self
+            .sockets
+            .values()
+            .any(|job| job.host == host && job.payload.as_slice() == command);
+        if !pending && !inflight {
+            self.follow_queue.push_back((host, command));
         }
-        if self.sockets.values().any(|job| job.host == host && !job.payload.is_empty()) {
-            return;
-        }
-        let ip = self.ip(host);
-        let Some(socket) = socket::tcp_connect(&ip, 4028, on_socket) else {
-            return;
-        };
-        self.sockets.insert(
-            socket.0.to_wire(),
-            SocketJob {
-                host,
-                started: TICK.get(),
-                connected: false,
-                poll: true,
-                control: false,
-                payload: command.to_vec(),
-                buf: Vec::new(),
-                socket,
-            },
-        );
     }
 
     /// One read-only status round per miner. Pool data is fetched with GET or
@@ -2043,27 +2270,10 @@ impl App {
     }
 
     fn open_poll_socket(&mut self, host: u8) {
-        if self.sockets.len() >= MAX_SOCKETS {
-            self.tcp_queue.push_back(host);
+        if self.tcp_queue.contains(&host) || self.sockets.values().any(|job| job.host == host) {
             return;
         }
-        let ip = self.ip(host);
-        let Some(socket) = socket::tcp_connect(&ip, 4028, on_socket) else {
-            return;
-        };
-        self.sockets.insert(
-            socket.0.to_wire(),
-            SocketJob {
-                host,
-                started: TICK.get(),
-                connected: false,
-                poll: true,
-                control: false,
-                payload: Vec::new(),
-                buf: Vec::new(),
-                socket,
-            },
-        );
+        self.tcp_queue.push_back(host);
     }
 
     fn queue_tcp(&mut self, host: u8, urgent: bool) {
@@ -2345,7 +2555,12 @@ impl App {
             return true;
         }
         if id == "saver-clock" {
-            self.saver_weather = false;
+            self.saver_mode = SaverMode::Clock;
+            self.store_saver();
+            return true;
+        }
+        if id == "saver-neural" {
+            self.saver_mode = SaverMode::Neural;
             self.store_saver();
             return true;
         }
@@ -2354,7 +2569,7 @@ impl App {
             return true;
         }
         if id == "saver-weather" {
-            self.saver_weather = true;
+            self.saver_mode = SaverMode::Weather;
             self.store_saver();
             self.weather.fetched_at = 0;
             return true;
@@ -2459,6 +2674,7 @@ impl App {
         if id == "back" {
             if self.chart_open {
                 self.chart_open = false;
+                self.chart_next = 0;
                 return true;
             }
             self.selected = None;
@@ -2467,13 +2683,19 @@ impl App {
         }
         if id == "chart-open" && self.selected.is_some() {
             self.chart_open = true;
+            self.chart_next = 0;
             self.flush_charts(true);
             return true;
         }
         if let Some(raw) = id.strip_prefix("span-") {
             if let Ok(index) = raw.parse::<u8>() {
-                if (index as usize) < CHART_SPANS.len() {
+                let braiins = self.selected.as_deref().is_some_and(|ip| {
+                    self.miners.iter().any(|miner| miner.ip == ip && miner.family == "braiins")
+                });
+                let limit = if braiins { BRAIINS_CHART_SPANS.len() } else { CHART_SPANS.len() };
+                if (index as usize) < limit {
                     self.chart_span = index;
+                    self.chart_next = 0;
                     return true;
                 }
             }
@@ -2688,7 +2910,12 @@ impl App {
         if self.phase != Phase::Live {
             return;
         }
-        if !self.queue.is_empty() || !self.inflight.is_empty() || !self.sockets.is_empty() || !self.tcp_queue.is_empty() {
+        if !self.queue.is_empty()
+            || !self.inflight.is_empty()
+            || !self.sockets.is_empty()
+            || !self.tcp_queue.is_empty()
+            || !self.follow_queue.is_empty()
+        {
             return;
         }
         let mut ips = Vec::new();
@@ -3359,6 +3586,9 @@ impl App {
         };
         if self.send_braiins(miner, path, &body, &notice) {
             self.remember_tune_sent(&miner.ip, index as u8);
+            if notice.starts_with("Setting hashrate target") || notice.starts_with("Setting power target") {
+                self.notice_ms = 2_000;
+            }
         }
     }
 
@@ -3370,8 +3600,37 @@ impl App {
         self.send_tcp(host, payload, notice, false)
     }
 
+    fn make_room_for_command(&mut self, host: u8) {
+        let crowded = self.sockets.len() >= MAX_SOCKETS;
+        let polling_target = self.sockets.values().any(|job| job.host == host && !job.control);
+        if !crowded && !polling_target {
+            return;
+        }
+        let same_host = self
+            .sockets
+            .iter()
+            .find(|(_, job)| job.host == host && !job.control)
+            .map(|(id, job)| (*id, job.host));
+        let oldest_poll = self
+            .sockets
+            .iter()
+            .filter(|(_, job)| !job.control)
+            .min_by_key(|(_, job)| job.started)
+            .map(|(id, job)| (*id, job.host));
+        let Some((id, queued)) = same_host.or(oldest_poll) else {
+            return;
+        };
+        if let Some(job) = self.sockets.remove(&id) {
+            job.socket.close();
+        }
+        if !self.tcp_queue.contains(&queued) {
+            self.tcp_queue.push_back(queued);
+        }
+    }
+
     fn send_tcp(&mut self, host: u8, payload: &str, notice: &str, terminate: bool) -> bool {
         self.notice = notice.to_owned();
+        self.make_room_for_command(host);
         if self.sockets.len() >= MAX_SOCKETS {
             self.notice = "Port 4028 is busy. Try again in a moment.".to_owned();
             return false;
@@ -3467,7 +3726,7 @@ impl App {
             self.weather.error = OUTBOUND_WEATHER_ERROR.to_owned();
             return;
         }
-        if !self.saver_weather || self.place.trim().is_empty() || self.weather_fetch.is_some() {
+        if self.saver_mode != SaverMode::Weather || self.place.trim().is_empty() || self.weather_fetch.is_some() {
             return;
         }
         if self.inflight.len() >= MAX_FETCHES {
@@ -3770,8 +4029,255 @@ fn note_miss(miner: &mut Miner) {
 fn remember(miner: &mut Miner) {
     miner.reachable = true;
     miner.misses = 0;
+    if miner.chart_remote {
+        return;
+    }
     if let Some(rate) = miner.hashrate_ths {
         record_chart(miner, SystemTime::now().unix_secs, rate);
+    }
+}
+
+fn braiins_graph_window(span_index: usize) -> u8 {
+    let index = span_index.min(BRAIINS_CHART_SPANS.len() - 1);
+    (index as u8) + 1
+}
+
+fn braiins_graph_refresh(window: u8) -> i64 {
+    match window {
+        1 => 8,
+        2 => 30,
+        3 => 60,
+        _ => 120,
+    }
+}
+
+fn graph_request(ip: &str, window: u8) -> Vec<u8> {
+    let frame = grpc_frame(&[0x08, window]);
+    let mut out = format!(
+        "POST /braiins.boser.web.PersistentGraphsService/Subscribe HTTP/1.1\r\nHost: {ip}\r\nContent-Type: application/grpc-web+proto\r\nAccept: application/grpc-web+proto\r\nX-Grpc-Web: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        frame.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(&frame);
+    out
+}
+
+/// Decode a chunked grpc-web burst. `done` means the history is complete or the reply failed.
+fn graph_samples(raw: &[u8]) -> Option<(Vec<ChartSample>, bool)> {
+    let split = raw.windows(4).position(|mark| mark == b"\r\n\r\n")?;
+    let header = &raw[..split];
+    let ok = header.starts_with(b"HTTP/1.1 200") || header.starts_with(b"HTTP/1.0 200");
+    if !ok {
+        return Some((Vec::new(), true));
+    }
+    let mut body = &raw[split + 4..];
+    let mut decoded = Vec::new();
+    loop {
+        let Some(line_end) = body.windows(2).position(|mark| mark == b"\r\n") else {
+            break;
+        };
+        let line = &body[..line_end];
+        let size_txt = line.split(|&byte| byte == b';').next().unwrap_or(line);
+        let size_str = std::str::from_utf8(size_txt).ok()?.trim();
+        if size_str.is_empty() {
+            break;
+        }
+        let n = usize::from_str_radix(size_str, 16).ok()?;
+        let start = line_end + 2;
+        if n == 0 {
+            break;
+        }
+        if body.len() < start + n {
+            decoded.extend_from_slice(&body[start..]);
+            break;
+        }
+        decoded.extend_from_slice(&body[start..start + n]);
+        if body.len() < start + n + 2 {
+            break;
+        }
+        body = &body[start + n + 2..];
+    }
+    let mut samples = Vec::new();
+    let mut index = 0;
+    let mut done = false;
+    while index + 5 <= decoded.len() {
+        let flag = decoded[index];
+        let len = u32::from_be_bytes([
+            decoded[index + 1],
+            decoded[index + 2],
+            decoded[index + 3],
+            decoded[index + 4],
+        ]) as usize;
+        if len > 1_000_000 {
+            return Some((collapse_samples(samples), true));
+        }
+        if index + 5 + len > decoded.len() {
+            break;
+        }
+        if flag & 0x80 != 0 {
+            done = true;
+            break;
+        }
+        if let Some(sample) = envelope_sample(&decoded[index + 5..index + 5 + len]) {
+            samples.push(sample);
+        }
+        index += 5 + len;
+        if samples.len() >= 300 {
+            done = true;
+            break;
+        }
+    }
+    Some((collapse_samples(samples), done))
+}
+
+fn collapse_samples(mut samples: Vec<ChartSample>) -> Vec<ChartSample> {
+    samples.sort_by_key(|sample| sample.at);
+    let mut out: Vec<ChartSample> = Vec::with_capacity(samples.len());
+    for sample in samples {
+        if let Some(last) = out.last_mut() {
+            if last.at == sample.at {
+                last.hash = sample.hash;
+                continue;
+            }
+        }
+        out.push(sample);
+    }
+    out
+}
+
+fn envelope_sample(msg: &[u8]) -> Option<ChartSample> {
+    let mut index = 0;
+    let mut at = None;
+    let mut hash = 0.0_f64;
+    let mut saw_hash = false;
+    while index < msg.len() {
+        let key = read_varint(msg, &mut index)?;
+        let field = key >> 3;
+        let wire = (key & 7) as u8;
+        match wire {
+            0 => {
+                let _ = read_varint(msg, &mut index)?;
+            }
+            1 => {
+                if index + 8 > msg.len() {
+                    return None;
+                }
+                index += 8;
+            }
+            2 => {
+                let len = read_varint(msg, &mut index)? as usize;
+                if index + len > msg.len() {
+                    return None;
+                }
+                let sub = &msg[index..index + len];
+                index += len;
+                if field == 1 {
+                    if let Some(seconds) = proto_field_varint(sub, 1) {
+                        at = Some(seconds as i64);
+                    }
+                } else if field == 2 {
+                    if let Some(ths) = proto_field_fixed64(sub, 2) {
+                        if ths.is_finite() {
+                            hash += ths;
+                            saw_hash = true;
+                        }
+                    }
+                }
+            }
+            5 => {
+                if index + 4 > msg.len() {
+                    return None;
+                }
+                index += 4;
+            }
+            _ => return None,
+        }
+    }
+    if !saw_hash {
+        return None;
+    }
+    Some(ChartSample {
+        at: at?,
+        hash: hash as f32,
+    })
+}
+
+fn proto_field_varint(msg: &[u8], want: u64) -> Option<u64> {
+    let mut index = 0;
+    let mut found = None;
+    while index < msg.len() {
+        let key = read_varint(msg, &mut index)?;
+        let field = key >> 3;
+        let wire = (key & 7) as u8;
+        if wire == 0 {
+            let value = read_varint(msg, &mut index)?;
+            if field == want {
+                found = Some(value);
+            }
+        } else if !skip_proto(msg, &mut index, wire) {
+            return found;
+        }
+    }
+    found
+}
+
+fn proto_field_fixed64(msg: &[u8], want: u64) -> Option<f64> {
+    let mut index = 0;
+    let mut sum = 0.0_f64;
+    let mut saw = false;
+    while index < msg.len() {
+        let key = read_varint(msg, &mut index)?;
+        let field = key >> 3;
+        let wire = (key & 7) as u8;
+        if wire == 1 {
+            if index + 8 > msg.len() {
+                return None;
+            }
+            if field == want {
+                let bits = u64::from_le_bytes(msg[index..index + 8].try_into().ok()?);
+                let value = f64::from_bits(bits);
+                if value.is_finite() {
+                    sum += value;
+                    saw = true;
+                }
+            }
+            index += 8;
+        } else if !skip_proto(msg, &mut index, wire) {
+            break;
+        }
+    }
+    if saw { Some(sum) } else { None }
+}
+
+fn skip_proto(msg: &[u8], index: &mut usize, wire: u8) -> bool {
+    match wire {
+        0 => read_varint(msg, index).is_some(),
+        1 => {
+            if *index + 8 > msg.len() {
+                return false;
+            }
+            *index += 8;
+            true
+        }
+        2 => {
+            let Some(len) = read_varint(msg, index) else {
+                return false;
+            };
+            let len = len as usize;
+            if *index + len > msg.len() {
+                return false;
+            }
+            *index += len;
+            true
+        }
+        5 => {
+            if *index + 4 > msg.len() {
+                return false;
+            }
+            *index += 4;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -4798,6 +5304,7 @@ fn blank(host: u8, ip: &str) -> Miner {
         misses: 0,
         chart: Vec::new(),
         chart_dirty: false,
+        chart_remote: false,
         harlo_legacy: false,
     }
 }
@@ -6361,7 +6868,19 @@ fn hash_pill_sized(app: &App, value_size: u32, pad: f32) -> Node {
 }
 
 fn hash_pill(app: &App) -> Node {
-    hash_pill_sized(app, 32, 14.0)
+    let numbers = fleet_numbers(app);
+    let (hash, zec_hash) = fleet_hash_lines(numbers.sha, numbers.zec);
+    let mut rows = vec![text(
+        hash,
+        style!(size: 96, weight: FontWeight::BOLD, color: Color::from_rgb(144, 219, 255), line_height: 1.0),
+    )];
+    if let Some(zec) = zec_hash {
+        rows.push(text(
+            zec,
+            style!(size: 48, weight: FontWeight::SEMIBOLD, color: Color::from_rgb(157, 180, 208), line_height: 1.0),
+        ));
+    }
+    col(props!(gap: 4.0, cross_align: CrossAlign::Center), rows)
 }
 
 fn saver_shell(width: f32, height: f32, draws: Vec<Draw>, body: Node) -> Node {
@@ -6394,7 +6913,10 @@ fn saver_shell(width: f32, height: f32, draws: Vec<Draw>, body: Node) -> Node {
 
 fn screensaver_view(app: &App, width: f32, height: f32) -> Node {
     let height = screen_h(height);
-    if app.saver_weather {
+    if app.saver_mode == SaverMode::Neural {
+        return neural_board(app, width, height);
+    }
+    if app.saver_mode == SaverMode::Weather {
         let weather = &app.weather;
         let (stops, headline, sub, label) = if !app.outbound {
             (
@@ -7333,14 +7855,22 @@ fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
                 ),
                 settings_fill(
                     &[
-                        ("saver-clock", "Clock", Some(!app.saver_weather)),
-                        ("saver-weather", "Weather", Some(app.saver_weather)),
+                        ("saver-clock", "Clock", Some(app.saver_mode == SaverMode::Clock)),
+                        ("saver-weather", "Weather", Some(app.saver_mode == SaverMode::Weather)),
+                        ("saver-neural", "Neural View", Some(app.saver_mode == SaverMode::Neural)),
+                    ],
+                    view_w,
+                    56.0,
+                    20,
+                ),
+                settings_fill(
+                    &[
                         ("temp-f", "°F", Some(app.weather_f)),
                         ("temp-c", "°C", Some(!app.weather_f)),
                         ("place-edit", &city, None),
                     ],
                     view_w,
-                    64.0,
+                    56.0,
                     20,
                 ),
                 row(
@@ -9099,7 +9629,7 @@ fn dashboard(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
                 [
                     hashrate_column(miner, left_w, body_h),
                     temperature_column(miner, mid_w, body_h),
-                    pool_column(miner, right_w, body_h),
+                    pool_column(miner, app, right_w, body_h),
                 ],
             ),
         ],
@@ -9139,7 +9669,20 @@ fn dashboard_header(miner: &Miner, app: &App, width: f32) -> Node {
             row(
                 props!(gap: 8.0, cross_align: CrossAlign::Center),
                 [
-                    clipped(status, 15, FontWeight::SEMIBOLD, color, 200.0),
+                    if app.notice.is_empty() {
+                        clipped(status, 15, FontWeight::SEMIBOLD, color, 200.0)
+                    } else {
+                        col(
+                            props!(
+                                height: 36.0,
+                                background: Color::from_rgb(0, 0, 0),
+                                border_radius: 8.0,
+                                padding: 8.0,
+                                justify_content: Justify::Center,
+                            ),
+                            [clipped(status, 15, FontWeight::SEMIBOLD, color, 240.0)],
+                        )
+                    },
                     gear_button(),
                 ],
             ),
@@ -9621,7 +10164,7 @@ fn ring_arc(cx: f32, cy: f32, radius: f32, fraction: f32) -> Vec<(f32, f32)> {
     points
 }
 
-fn pool_column(miner: &Miner, width: f32, height: f32) -> Node {
+fn pool_column(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
     let gap = 8.0;
     let usable = height - gap * 2.0;
     let pool_h = 110.0;
@@ -9636,7 +10179,7 @@ fn pool_column(miner: &Miner, width: f32, height: f32) -> Node {
         props!(width: width, height: height, gap: gap),
         [
             pool_card(miner, width, pool_h),
-            chart_card(miner, width, chart_h),
+            chart_card(miner, app, width, chart_h),
             controls_card(miner, width, controls_h),
         ],
     )
@@ -9683,11 +10226,17 @@ fn pool_card(miner: &Miner, width: f32, height: f32) -> Node {
     )
 }
 
-fn chart_card(miner: &Miner, width: f32, height: f32) -> Node {
+fn chart_card(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
     let plot_w = (width - 28.0).max(40.0);
     let plot_h = (height - 62.0).max(36.0);
     let now = SystemTime::now().unix_secs;
-    let (draws, _) = chart_plot(&miner.chart, now, 15 * 60, plot_w, plot_h, false);
+    let (span, label) = if miner.family == "braiins" {
+        let index = (app.chart_span as usize).min(BRAIINS_CHART_SPANS.len() - 1);
+        BRAIINS_CHART_SPANS[index]
+    } else {
+        (15 * 60, "15 min")
+    };
+    let (draws, _) = chart_plot(&miner.chart, now, span, plot_w, plot_h, false);
     col(
         props!(
             width: width,
@@ -9705,7 +10254,7 @@ fn chart_card(miner: &Miner, width: f32, height: f32) -> Node {
                 style!(size: 20, weight: FontWeight::SEMIBOLD, color: WHITE, line_height: 1.0),
             ),
             text(
-                format!("{}   ·   15 min", display_hashrate(miner)),
+                format!("{}   ·   {label}", display_hashrate(miner)),
                 style!(size: 16, color: MUTED, line_height: 1.0),
             ),
             canvas(props!(width: plot_w, height: plot_h), draws),
@@ -9722,8 +10271,13 @@ fn chart_screen(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
     let height = screen_h(height);
     let pad = 8.0;
     let inner = (width - pad * 2.0).max(100.0);
-    let span_index = (app.chart_span as usize).min(CHART_SPANS.len() - 1);
-    let (span, _) = CHART_SPANS[span_index];
+    let spans: &[(i64, &str)] = if miner.family == "braiins" {
+        &BRAIINS_CHART_SPANS
+    } else {
+        &CHART_SPANS
+    };
+    let span_index = (app.chart_span as usize).min(spans.len() - 1);
+    let (span, _) = spans[span_index];
     let now = SystemTime::now().unix_secs;
     let header_h = 52.0;
     let range_h = 48.0;
@@ -9738,9 +10292,9 @@ fn chart_screen(miner: &Miner, app: &App, width: f32, height: f32) -> Node {
         (plot_h - plot_pad * 2.0).max(40.0),
         true,
     );
-    let gap_count = 7.0;
-    let chip_w = ((inner - 8.0 * gap_count) / CHART_SPANS.len() as f32).max(40.0);
-    let chips: Vec<Node> = CHART_SPANS
+    let gap_count = (spans.len() - 1) as f32;
+    let chip_w = ((inner - 8.0 * gap_count) / spans.len() as f32).max(40.0);
+    let chips: Vec<Node> = spans
         .iter()
         .enumerate()
         .map(|(index, (_, name))| range_chip(&format!("span-{index}"), name, index == span_index, chip_w))
@@ -9848,7 +10402,7 @@ fn controls_card(miner: &Miner, width: f32, height: f32) -> Node {
                 let selected = miner
                     .mode_sent
                     .is_some_and(|mode| id == format!("mode-{mode}"));
-                compact_pill(id, label, selected)
+                mode_pill(id, label, selected)
             })
             .collect();
         rows.push(row(props!(gap: 8.0, width: inner), modes));
@@ -9860,7 +10414,7 @@ fn controls_card(miner: &Miner, width: f32, height: f32) -> Node {
                 .iter()
                 .enumerate()
                 .map(|(index, tune)| {
-                    compact_pill(
+                    mode_pill(
                         &format!("tune-{index}"),
                         &tune.label,
                         miner.tune_sent == Some(index as u8),
@@ -9876,13 +10430,17 @@ fn controls_card(miner: &Miner, width: f32, height: f32) -> Node {
 fn control_art(id: &str, image: &Bitmap) -> Node {
     touchable(
         id,
-        props!(width: 88.0, height: 88.0),
-        [Draw::bitmap(0.0, 0.0, 88.0, 88.0, image)],
+        props!(width: 88.0, height: 68.0),
+        [Draw::bitmap(0.0, 0.0, 88.0, 68.0, image)],
     )
 }
 
 fn compact_pill(id: &str, label: &str, selected: bool) -> Node {
     choice_button(id, label, Some(selected), 40.0, 16)
+}
+
+fn mode_pill(id: &str, label: &str, selected: bool) -> Node {
+    choice_button(id, label, Some(selected), 60.0, 16)
 }
 
 fn shows_fan_controls(miner: &Miner) -> bool {
@@ -10543,6 +11101,9 @@ fn handle_fleet_gesture(clicks: &HashMap<String, TouchHit>, drags: &HashMap<Stri
     let mut changed = false;
     APP.with(|slot| {
         let mut app = slot.borrow_mut();
+        if app.swallow_touch {
+            return;
+        }
         if app.selected.is_some() {
             app.gesture_y = None;
             app.gesture_moved = false;
@@ -10719,10 +11280,21 @@ pub extern "C" fn render(delta_ms: u32) {
             if app.share_flash_ms > 0 {
                 app.share_flash_ms = app.share_flash_ms.saturating_sub(delta_ms);
             }
+            if app.notice_ms > 0 {
+                app.notice_ms = app.notice_ms.saturating_sub(delta_ms);
+                if app.notice_ms == 0
+                    && (app.notice.starts_with("Setting hashrate target")
+                        || app.notice.starts_with("Setting power target"))
+                {
+                    app.notice.clear();
+                }
+            }
             if app.phase == Phase::Live
                 && app.queue.is_empty()
                 && app.inflight.is_empty()
                 && app.sockets.is_empty()
+                && app.tcp_queue.is_empty()
+                && app.follow_queue.is_empty()
                 && !app.miners.is_empty()
             {
                 app.since_poll = app.since_poll.saturating_add(delta_ms);
@@ -10732,6 +11304,7 @@ pub extern "C" fn render(delta_ms: u32) {
                 }
             }
             app.promote_best();
+            app.pump_charts();
             app.poll_deck(delta_ms);
             app.maybe_fetch_weather();
             app.fill();
@@ -10765,6 +11338,7 @@ pub extern "C" fn render(delta_ms: u32) {
             }
             if limit > 0 && !app.settings && app.idle_ms >= limit {
                 app.saver_on = true;
+                app.neural_hint_ms = 0;
             }
         }
         app.maybe_check_update(delta_ms);
@@ -10802,11 +11376,16 @@ pub extern "C" fn render(delta_ms: u32) {
     }
     handle_brightness(&drawn.drags);
     handle_clicks(&drawn.clicks);
-    let (animate_neural, flash_left, celebrating, settings) = APP.with(|app| {
+    let (animate_neural, flash_left, notice_left, celebrating, settings) = APP.with(|app| {
         let app = app.borrow();
         (
-            app.neural && !app.saver_on && app.selected.is_none() && !app.settings && app.celebration.is_none() && !app.miners.is_empty(),
+            !app.settings
+                && app.celebration.is_none()
+                && !app.miners.is_empty()
+                && ((app.neural && !app.saver_on && app.selected.is_none())
+                    || (app.saver_on && app.saver_mode == SaverMode::Neural)),
             app.share_flash_ms,
+            app.notice_ms,
             app.celebration.is_some(),
             app.settings && app.celebration.is_none(),
         )
@@ -10829,6 +11408,8 @@ pub extern "C" fn render(delta_ms: u32) {
         request_frame_after(80);
     } else if flash_left > 0 {
         request_frame_after(16);
+    } else if notice_left > 0 {
+        request_frame_after(notice_left.min(1_000));
     } else {
         request_frame_after(1000);
     }
