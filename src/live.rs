@@ -6201,7 +6201,13 @@ fn tailscale_view(app: &App, width: f32, height: f32) -> Node {
     let mut screen = vec![
         row(
             props!(height: FLEET_HEADER_H, width: width, gap: 16.0, cross_align: CrossAlign::Center, background: BAR_FILL, padding: 8.0),
-            [back_button("tailscale-close")],
+            [
+                back_button("tailscale-close"),
+                text(
+                    "Tailscale | Remote Monitoring",
+                    style!(size: 28, weight: FontWeight::BOLD, family: FontFamily::DeckSans, color: WHITE, line_height: 1.0),
+                ),
+            ],
         ),
         row(
             props!(width: width, height: body_h, background: METRIC_FILL, padding: 8.0, gap: if show_cat { 24.0 } else { 72.0 }, cross_align: CrossAlign::Start),
@@ -6376,14 +6382,30 @@ fn settings_group(
 }
 
 fn settings_bar(id: &str, title: &str, detail: &str, detail_color: Color, width: f32, height: f32) -> Node {
+    let inner = (width - 32.0).max(40.0);
+    let title_max = if detail.is_empty() { inner } else { (inner * 0.62).max(120.0) };
     let mut kids = vec![text(
         title,
-        style!(size: 26, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
+        style!(
+            size: 26,
+            weight: FontWeight::BOLD,
+            color: WHITE,
+            line_height: 1.0,
+            text_overflow: TextOverflow::Ellipsis,
+            max_width: title_max as u32,
+        ),
     )];
     if !detail.is_empty() {
         kids.push(text(
             detail,
-            style!(size: 22, weight: FontWeight::SEMIBOLD, color: detail_color, line_height: 1.0),
+            style!(
+                size: 22,
+                weight: FontWeight::SEMIBOLD,
+                color: detail_color,
+                line_height: 1.0,
+                text_overflow: TextOverflow::Ellipsis,
+                max_width: (inner - title_max).max(80.0) as u32,
+            ),
         ));
     }
     kids.push(touchable(
@@ -6476,11 +6498,6 @@ fn settings_menu(app: &App, width: f32, height: f32) -> Node {
     let gap = 12.0;
     let bar_h = ((view_h - gap * 3.0) / 4.0).max(52.0);
     let col_w = (view_w - gap) / 2.0;
-    let pct = shown_brightness(app);
-    let pct_label = if pct < 10 { "—".to_owned() } else { format!("{pct}%") };
-    let seconds = app.poll_ms / 1_000;
-    let layout = if app.fleet_groups { "Groups" } else { "Hashrate" };
-    let sound = format!("Sound {}%", app.sound_volume);
     settings_frame(
         "Settings",
         "close-settings",
@@ -6494,37 +6511,30 @@ fn settings_menu(app: &App, width: f32, height: f32) -> Node {
                     [
                         settings_bar(
                             "tailscale-open",
-                            "Tailscale",
-                            tailscale_status_line(&app.tailscale_state),
-                            tailscale_status_color(&app.tailscale_state),
-                            col_w,
-                            bar_h,
-                        ),
-                        settings_bar("settings-display", "Display", &pct_label, EMERALD, col_w, bar_h),
-                    ],
-                ),
-                row(
-                    props!(width: view_w, height: bar_h, gap: gap, cross_align: CrossAlign::Center),
-                    [
-                        settings_bar("settings-rgb", "RGB", &app.led_label, EMERALD, col_w, bar_h),
-                        settings_bar("settings-layout", "Layout", layout, EMERALD, col_w, bar_h),
-                    ],
-                ),
-                row(
-                    props!(width: view_w, height: bar_h, gap: gap, cross_align: CrossAlign::Center),
-                    [
-                        settings_bar("settings-alerts", "Alerts", &sound, EMERALD, col_w, bar_h),
-                        settings_bar(
-                            "settings-refresh",
-                            "Refresh",
-                            &format!("{seconds}s"),
+                            "Tailscale | Remote Monitoring",
+                            "",
                             EMERALD,
                             col_w,
                             bar_h,
                         ),
+                        settings_bar("settings-display", "Display | Weather", "", EMERALD, col_w, bar_h),
                     ],
                 ),
-                settings_bar("settings-support", "Support", DECK_VERSION, LABEL, view_w, bar_h),
+                row(
+                    props!(width: view_w, height: bar_h, gap: gap, cross_align: CrossAlign::Center),
+                    [
+                        settings_bar("settings-rgb", "RGB | Modes", "", EMERALD, col_w, bar_h),
+                        settings_bar("settings-layout", "Layout | Names", "", EMERALD, col_w, bar_h),
+                    ],
+                ),
+                row(
+                    props!(width: view_w, height: bar_h, gap: gap, cross_align: CrossAlign::Center),
+                    [
+                        settings_bar("settings-alerts", "Alerts | Sound", "", EMERALD, col_w, bar_h),
+                        settings_bar("settings-refresh", "Refresh | Poll", "", EMERALD, col_w, bar_h),
+                    ],
+                ),
+                settings_bar("settings-support", "Support | Download", "", LABEL, view_w, bar_h),
             ],
         ),
     )
@@ -6537,7 +6547,7 @@ fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
     let city = if app.place.is_empty() { "Set city".to_owned() } else { app.place.clone() };
     let slider_w = (view_w - 280.0).max(160.0);
     settings_frame(
-        "Display",
+        "Display | Weather",
         "settings-menu",
         width,
         height,
@@ -6631,15 +6641,18 @@ fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
 fn settings_rgb_page(app: &App, width: f32, height: f32) -> Node {
     let (view_w, _) = settings_box(width, height);
     settings_frame(
-        "RGB",
+        "RGB | Modes",
         "settings-menu",
         width,
         height,
         col(
             props!(width: view_w, gap: 12.0),
             [
-                settings_group(
-                    "Share LED",
+                text(
+                    "Flash on Share Increments",
+                    style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
+                ),
+                settings_fill(
                     &[
                         ("pulse-on", "On", Some(app.share_pulse)),
                         ("pulse-off", "Off", Some(!app.share_pulse)),
@@ -6648,7 +6661,6 @@ fn settings_rgb_page(app: &App, width: f32, height: f32) -> Node {
                     view_w,
                     56.0,
                     22,
-                    240.0,
                 ),
                 settings_led_block(app, view_w),
                 text(
@@ -6664,7 +6676,7 @@ fn settings_layout_page(app: &App, width: f32, height: f32) -> Node {
     let (view_w, view_h) = settings_box(width, height);
     let summary_h = (view_h - 56.0 * 2.0 - 10.0 * 2.0).max(140.0);
     settings_frame(
-        "Layout",
+        "Layout | Names",
         "settings-menu",
         width,
         height,
@@ -6703,7 +6715,7 @@ fn settings_layout_page(app: &App, width: f32, height: f32) -> Node {
 fn settings_alerts_page(app: &App, width: f32, height: f32) -> Node {
     let (view_w, _) = settings_box(width, height);
     settings_frame(
-        "Alerts",
+        "Alerts | Sound",
         "settings-menu",
         width,
         height,
@@ -6750,7 +6762,7 @@ fn settings_refresh_page(app: &App, width: f32, height: f32) -> Node {
     let (view_w, _) = settings_box(width, height);
     let seconds = app.poll_ms / 1_000;
     settings_frame(
-        "Refresh",
+        "Refresh | Poll",
         "settings-menu",
         width,
         height,
@@ -6781,7 +6793,7 @@ fn settings_refresh_page(app: &App, width: f32, height: f32) -> Node {
 fn settings_support_page(width: f32, height: f32) -> Node {
     let (view_w, view_h) = settings_box(width, height);
     settings_frame(
-        "Support",
+        "Support | Download",
         "settings-menu",
         width,
         height,
