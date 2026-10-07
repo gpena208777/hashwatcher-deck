@@ -237,6 +237,18 @@ struct App {
     deck_fetch: Option<u32>,
     deck_kind: u8,
     deck_wait_ms: u32,
+    /// Last `deck` param applied or published, so an echo does not reload the fleet.
+    controls_remote: String,
+    controls_pending: String,
+    controls_dirty: bool,
+    applying_remote: bool,
+    sync_scene: String,
+    sync_widget: String,
+    sync_retry_ms: u32,
+    inventory_stamp: String,
+    inventory_seen: bool,
+    /// City was chosen on the Deck. Ignore a phone push that still has the previous city.
+    place_local: bool,
     brightness_drag: bool,
     zec_fan: Option<ZecFanJob>,
     zec_fetch: Option<u32>,
@@ -461,6 +473,16 @@ impl App {
             deck_fetch: None,
             deck_kind: 0,
             deck_wait_ms: 30_000,
+            controls_remote: String::new(),
+            controls_pending: String::new(),
+            controls_dirty: false,
+            applying_remote: false,
+            sync_scene: String::new(),
+            sync_widget: String::new(),
+            sync_retry_ms: 0,
+            inventory_stamp: String::new(),
+            inventory_seen: false,
+            place_local: false,
             brightness_drag: false,
             zec_fan: None,
             zec_fetch: None,
@@ -561,11 +583,12 @@ impl App {
         }
     }
 
-    fn store_poll(&self) {
+    fn store_poll(&mut self) {
         bmc_wasm_sdk::kv::set("poll_s", (self.poll_ms / 1_000).to_string().as_bytes());
+        self.touch_controls();
     }
 
-    fn store_saver(&self) {
+    fn store_saver(&mut self) {
         bmc_wasm_sdk::kv::set("saver_ms", self.saver_ms.to_string().as_bytes());
         bmc_wasm_sdk::kv::set(
             "saver_mode",
@@ -593,9 +616,18 @@ impl App {
             .collect::<Vec<_>>()
             .join(",");
         bmc_wasm_sdk::kv::set("summary_cols", cols.as_bytes());
+        self.touch_controls();
+    }
+
+    fn touch_controls(&mut self) {
+        if !self.applying_remote {
+            self.controls_dirty = true;
+        }
     }
 
     fn apply_inventory(&mut self) {
+        self.inventory_stamp = inventory_param_stamp();
+        self.inventory_seen = true;
         self.cancel_work();
         self.queue.clear();
         self.tcp_queue.clear();
@@ -735,9 +767,10 @@ impl App {
             return;
         };
         let raw = raw.trim();
-        if raw.is_empty() {
+        if raw.is_empty() || raw == self.controls_remote {
             return;
         }
+        self.applying_remote = true;
         let mut brightness = None;
         let mut led = None;
         let mut city = None;
@@ -762,7 +795,12 @@ impl App {
                 "poll" => {
                     if let Ok(seconds) = value.parse::<u32>() {
                         self.poll_ms = seconds.saturating_mul(1_000).clamp(1_000, 60_000);
-                        self.store_poll();
+                    }
+                }
+                "out" => {
+                    let on = value != "0";
+                    if on != self.outbound {
+                        self.outbound = on;
                     }
                 }
                 "pulse" => self.share_pulse = value != "0",
@@ -804,6 +842,16 @@ impl App {
             self.brightness = percent;
             self.night_brightness = percent;
             self.push_brightness();
+        }
+        let incoming_city = city.clone().unwrap_or_default();
+        let previous_city = payload_value(&self.controls_remote, "city");
+        let stale_city = self.place_local && incoming_city == previous_city && incoming_city != self.place;
+        if stale_city {
+            city = None;
+            latitude = None;
+            longitude = None;
+        } else if incoming_city == self.place {
+            self.place_local = false;
         }
         if let Some(name) = city {
             if name.is_empty() {
@@ -865,6 +913,9 @@ impl App {
             }
         }
         self.store_saver();
+        self.applying_remote = false;
+        self.controls_remote = raw.to_owned();
+        self.controls_dirty = stale_city;
     }
 
     /// Phone custom mode: `effect:RRGGBB`, for example `breathe:FF5000`.
@@ -1158,6 +1209,14 @@ impl App {
         if self.deck_fetch.is_some() {
             return;
         }
+        if self.controls_dirty && !self.deck_token.is_empty() {
+            if self.sync_retry_ms > 0 {
+                self.sync_retry_ms = self.sync_retry_ms.saturating_sub(delta_ms.min(2_000));
+            } else {
+                self.publish_controls();
+                return;
+            }
+        }
         self.deck_wait_ms = self.deck_wait_ms.saturating_add(delta_ms.min(2_000));
         let due = if self.deck_token.is_empty() { 8_000 } else { 30_000 };
         if self.deck_wait_ms < due {
@@ -1215,6 +1274,98 @@ impl App {
         };
         self.deck_fetch = Some(id.to_wire());
         self.deck_kind = kind;
+    }
+
+    fn publish_controls(&mut self) {
+        if self.sync_widget.is_empty() || self.sync_scene.is_empty() {
+            self.deck_send(
+                6,
+                "/braiins.bmc.web.SceneManagementService/GetScenes",
+                grpc_frame(&[]),
+                true,
+            );
+            return;
+        }
+        let wire = self.controls_wire();
+        if wire == self.controls_remote {
+            self.controls_dirty = false;
+            return;
+        }
+        self.controls_pending = wire.clone();
+        let body = widget_update(&self.sync_widget, &self.sync_scene, &wire);
+        self.deck_send(
+            7,
+            "/braiins.bmc.web.SceneManagementService/UpdateWidget",
+            grpc_frame(&body),
+            true,
+        );
+    }
+
+    fn controls_wire(&self) -> String {
+        let led = if !self.led_hold {
+            "off".to_owned()
+        } else if self.led_rainbow {
+            "rainbow".to_owned()
+        } else {
+            let effect = match self.led_effect {
+                LedEffect::Solid => "solid",
+                LedEffect::Breathe => "breathe",
+                LedEffect::Chase => "chase",
+                LedEffect::Scan => "scan",
+                LedEffect::Snake => "snake",
+                LedEffect::KnightRider => "rider",
+            };
+            let (red, green, blue) = self.led_rgb;
+            format!("{effect}:{red:02X}{green:02X}{blue:02X}")
+        };
+        let names = match self.label_mode {
+            1 => "2",
+            2 => "0",
+            _ => "1",
+        };
+        let view = if self.neural {
+            "neural"
+        } else if self.summary {
+            "summary"
+        } else {
+            "fleet"
+        };
+        let city = self
+            .place
+            .replace([';', '='], " ")
+            .trim()
+            .to_owned();
+        let cols = self
+            .summary_cols
+            .iter()
+            .map(|col| summary_col_id(*col))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut fields = vec![
+            format!("vol={}", self.sound_volume),
+            format!("poll={}", self.poll_ms / 1_000),
+            format!("pulse={}", if self.share_pulse { "1" } else { "0" }),
+            format!("beep={}", if self.share_sound { "1" } else { "0" }),
+            format!("unit={}", if self.weather_f { "f" } else { "c" }),
+            format!("saver={}", self.saver_ms / 1_000),
+            format!("mode={}", if self.saver_weather { "weather" } else { "clock" }),
+            format!("led={led}"),
+            format!("cols={cols}"),
+            format!("city={city}"),
+            format!("view={view}"),
+            format!("names={names}"),
+            format!("groups={}", if self.fleet_groups { "1" } else { "0" }),
+            format!("out={}", if self.outbound { "1" } else { "0" }),
+        ];
+        let bright = shown_brightness(self);
+        if bright >= 10 {
+            fields.insert(5, format!("bright={bright}"));
+        }
+        if !city.is_empty() && self.weather.lat.is_finite() && self.weather.lon.is_finite() {
+            fields.push(format!("lat={:.4}", self.weather.lat));
+            fields.push(format!("lon={:.4}", self.weather.lon));
+        }
+        fields.join(";")
     }
 
     fn poll_tailscale(&mut self, delta_ms: u32) {
@@ -1351,6 +1502,19 @@ impl App {
                 }
             }
             2 => self.apply_display(msg),
+            6 => {
+                if let Some((scene, widget)) = find_hashwatcher_widget(msg) {
+                    self.sync_scene = scene;
+                    self.sync_widget = widget;
+                    self.sync_retry_ms = 0;
+                } else {
+                    self.sync_retry_ms = 8_000;
+                }
+            }
+            7 => {
+                self.controls_remote = self.controls_pending.clone();
+                self.controls_dirty = self.controls_wire() != self.controls_remote;
+            }
             4 => {
                 self.notice = "Alarm added".to_owned();
                 self.alarm_open = false;
@@ -2015,10 +2179,12 @@ impl App {
         }
         if id == "pulse-on" {
             self.share_pulse = true;
+            self.touch_controls();
             return true;
         }
         if id == "pulse-off" {
             self.share_pulse = false;
+            self.touch_controls();
             return true;
         }
         if id == "pulse-test" {
@@ -2117,6 +2283,7 @@ impl App {
             self.weather = Weather::default();
             self.weather_geo = true;
             self.weather_fetch = None;
+            self.place_local = true;
             self.store_saver();
             return true;
         }
@@ -2211,6 +2378,7 @@ impl App {
             }
             self.rainbow_ms = 1_200;
             self.led_refresh_ms = 0;
+            self.touch_controls();
             return true;
         }
         let known = matches!(
@@ -2264,6 +2432,7 @@ impl App {
                 if self.celebration.is_none() {
                     led::stop();
                 }
+                self.touch_controls();
                 return true;
             }
             "led-solid" => self.led_effect = LedEffect::Solid,
@@ -2275,6 +2444,7 @@ impl App {
             _ => return false,
         }
         self.paint_led();
+        self.touch_controls();
         true
     }
 
@@ -3232,6 +3402,7 @@ impl App {
         self.weather.label = hit.label;
         self.weather_geo = false;
         self.weather_fetch = None;
+        self.place_local = true;
         self.store_saver();
     }
 }
@@ -6618,16 +6789,24 @@ fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
                     64.0,
                     20,
                 ),
-                settings_group(
-                    "Outbound",
-                    &[
-                        ("outbound-on", "On", Some(app.outbound)),
-                        ("outbound-off", "Off", Some(!app.outbound)),
+                row(
+                    props!(width: view_w, height: 56.0, gap: 12.0, cross_align: CrossAlign::Center),
+                    [
+                        col(
+                            props!(width: 230.0, height: 56.0, justify_content: Justify::Center),
+                            [text(
+                                "Outbound Data",
+                                style!(
+                                    size: 22,
+                                    weight: FontWeight::BOLD,
+                                    color: WHITE,
+                                    line_height: 1.0,
+                                ),
+                            )],
+                        ),
+                        settings_cell("outbound-on", "On", Some(app.outbound), 160.0, 56.0, 22),
+                        settings_cell("outbound-off", "Off", Some(!app.outbound), 160.0, 56.0, 22),
                     ],
-                    view_w,
-                    56.0,
-                    22,
-                    220.0,
                 ),
                 text(
                     "Used only for weather data.",
@@ -6967,12 +7146,12 @@ fn settings_led_block(app: &App, width: f32) -> Node {
             ),
             settings_fill(
                 &[
-                    ("led-red", "Red", Some(app.led_hold && !app.led_rainbow && app.led_effect == LedEffect::Solid && app.led_rgb == (255, 32, 32))),
-                    ("led-amber", "Amber", Some(app.led_hold && !app.led_rainbow && app.led_effect == LedEffect::Solid && app.led_rgb == (255, 196, 0))),
-                    ("led-emerald", "Green", Some(app.led_hold && !app.led_rainbow && app.led_effect == LedEffect::Solid && app.led_rgb == (0, 204, 102))),
-                    ("led-blue", "Blue", Some(app.led_hold && !app.led_rainbow && app.led_effect == LedEffect::Solid && app.led_rgb == (0, 90, 255))),
-                    ("led-purple", "Purple", Some(app.led_hold && !app.led_rainbow && app.led_effect == LedEffect::Solid && app.led_rgb == (180, 40, 255))),
-                    ("led-white", "White", Some(app.led_hold && !app.led_rainbow && app.led_effect == LedEffect::Solid && app.led_rgb == (255, 255, 255))),
+                    ("led-red", "Red", Some(led_color_on(app, (255, 32, 32)))),
+                    ("led-amber", "Amber", Some(led_color_on(app, (255, 196, 0)))),
+                    ("led-emerald", "Green", Some(led_color_on(app, (0, 204, 102)))),
+                    ("led-blue", "Blue", Some(led_color_on(app, (0, 90, 255)))),
+                    ("led-purple", "Purple", Some(led_color_on(app, (180, 40, 255)))),
+                    ("led-white", "White", Some(led_color_on(app, (255, 255, 255)))),
                     ("led-off", "Off", Some(!app.led_hold)),
                 ],
                 width,
@@ -9398,6 +9577,107 @@ fn proto_bytes_field(field: u32, bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+fn led_color_on(app: &App, rgb: (u8, u8, u8)) -> bool {
+    app.led_hold && !app.led_rainbow && app.led_rgb == rgb
+}
+
+fn payload_value(raw: &str, key: &str) -> String {
+    raw.split(';').find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        (name == key).then(|| value.trim().to_owned())
+    }).unwrap_or_default()
+}
+
+fn inventory_param_stamp() -> String {
+    let snap = bmc_wasm_sdk::params::current();
+    ["inventory", "inventory2", "inventory3", "inventory4"]
+        .into_iter()
+        .map(|key| snap.get_str(key).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_hashwatcher_widget(msg: &[u8]) -> Option<(String, String)> {
+    const UID: &str = "c4e8a1d2-7b63-4f0e-9a15-6d2b8f0c3e71";
+    for scene in proto_len_all(msg, 1) {
+        let Some(scene_id) = proto_string(&scene, 1) else {
+            continue;
+        };
+        for kind in [4u32, 5] {
+            for wrapper in proto_len_all(&scene, kind) {
+                for widget in proto_len_all(&wrapper, 1) {
+                    let Some(widget_id) = proto_string(&widget, 1) else {
+                        continue;
+                    };
+                    let Some(config) = proto_bytes(&widget, 4) else {
+                        continue;
+                    };
+                    if proto_string(config, 1).as_deref() == Some(UID) && !scene_id.is_empty() && !widget_id.is_empty() {
+                        return Some((scene_id, widget_id));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn widget_update(id: &str, scene: &str, deck: &str) -> Vec<u8> {
+    let snap = bmc_wasm_sdk::params::current();
+    let mut params = Vec::new();
+    for key in ["inventory", "inventory2", "inventory3", "inventory4"] {
+        params.extend(widget_param(key, snap.get_str(key).unwrap_or("")));
+    }
+    params.extend(widget_param("deck", deck));
+    let mut msg = proto_string_field(1, id);
+    msg.extend(proto_string_field(2, scene));
+    msg.extend(proto_varint_field(4, 4));
+    msg.extend(proto_bytes_field(5, &params));
+    msg
+}
+
+fn widget_param(key: &str, value: &str) -> Vec<u8> {
+    let value = proto_string_field(5, value);
+    let mut entry = proto_string_field(1, key);
+    entry.extend(proto_bytes_field(2, &value));
+    proto_bytes_field(1, &entry)
+}
+
+fn proto_len_all(msg: &[u8], field: u32) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < msg.len() {
+        let Some(tag) = read_varint(msg, &mut index) else {
+            break;
+        };
+        let number = (tag >> 3) as u32;
+        match tag & 7 {
+            0 => {
+                if read_varint(msg, &mut index).is_none() {
+                    break;
+                }
+            }
+            2 => {
+                let Some(len) = read_varint(msg, &mut index) else {
+                    break;
+                };
+                let len = len as usize;
+                if index + len > msg.len() {
+                    break;
+                }
+                if number == field {
+                    out.push(msg[index..index + len].to_vec());
+                }
+                index += len;
+            }
+            5 => index += 4,
+            1 => index += 8,
+            _ => break,
+        }
+    }
+    out
+}
+
 fn grpc_frame(msg: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(5 + msg.len());
     out.push(0);
@@ -9528,6 +9808,7 @@ fn handle_brightness(drags: &HashMap<String, TouchHit>) {
             if app.brightness_drag {
                 app.brightness_drag = false;
                 app.push_brightness();
+                app.touch_controls();
             }
             return;
         };
@@ -9871,7 +10152,15 @@ pub extern "C" fn render(delta_ms: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn on_params_update() {
-    APP.with(|app| app.borrow_mut().apply_inventory());
+    APP.with(|app| {
+        let mut app = app.borrow_mut();
+        let stamp = inventory_param_stamp();
+        if app.inventory_seen && stamp == app.inventory_stamp {
+            app.apply_deck_controls();
+        } else {
+            app.apply_inventory();
+        }
+    });
     let paused = APP.with(|app| app.borrow().settings);
     if !paused {
         APP.with(|app| app.borrow_mut().fill());
