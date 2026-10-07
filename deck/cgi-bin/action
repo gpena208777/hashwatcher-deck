@@ -1,0 +1,13 @@
+#!/bin/sh
+# Localhost-only control for the Tailscale supervisor. uhttpd serves this from cgi-bin.
+printf 'Content-Type: application/json\r\n\r\n'
+cmd=$(printf '%s' "$QUERY_STRING" | sed 's/[^a-z].*//')
+case "$cmd" in
+stop|start|restart|relogin|reset)
+	printf '%s\n' "$cmd" > /mnt/data/tailscale/cmd
+	printf '{"ok":true,"cmd":"%s"}\n' "$cmd"
+	;;
+*)
+	printf '{"ok":false}\n'
+	;;
+esac
