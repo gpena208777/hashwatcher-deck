@@ -6,7 +6,25 @@ Miner passwords are not in this repository. They are supplied at runtime by the 
 
 ## Install the widget
 
-Braiins is adding a way to install HashWatcher from the Deck’s local webpage. That update is coming soon. Until it ships, a new Deck does not include this widget.
+Braiins is adding a way to install HashWatcher from the Deck’s local webpage. That update is coming soon. Until it ships, install over SSH.
+
+### Have an agent install it
+
+Paste this to an agent on a computer that can reach the Deck. Swipe down on the Deck and copy the IP address shown there. Put that address where the prompt says `YOUR_DECK_IP`. That placeholder is not a Deck address, and an example address will install nothing on your Deck.
+
+```text
+Install the HashWatcher widget from https://github.com/gpena208777/hashwatcher-deck on my Braiins Deck at YOUR_DECK_IP.
+
+SSH in as root. The password is blank unless I say otherwise. Build the crate at widgets-wasm/hashwatcher inside a BraiinsForge/bmc-main checkout, because it links the Deck SDK by relative path:
+
+cargo build -p hashwatcher --target wasm32-unknown-unknown --release
+
+Strip the wasm with bmc-wasm-assets, pack it as bmc-widget-hashwatcher, and install it with nix-store --add and bmc-nix-cli add-packages --name widget-hashwatcher --version 0.1.0.
+
+Add one fullscreen scene for widget uid c4e8a1d2-7b63-4f0e-9a15-6d2b8f0c3e71. Keep every scene and setting already in /etc/bmc/config.json. Write the file, then run killall bmc-openwrt so the Deck reloads it. Leave other widgets installed.
+
+Do not add miners and do not store miner passwords. I will send the fleet from HashWatcher.
+```
 
 ### Build it
 
