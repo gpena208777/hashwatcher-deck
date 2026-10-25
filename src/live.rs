@@ -21,11 +21,11 @@ const AMBER: Color = Color::from_hex(0xFF_FF_00);
 const RED: Color = Color::from_hex(0xFF_00_00);
 const BLUE: Color = Color::from_hex(0x4D_A3_FF);
 
-const PROBE_TIMEOUT: Duration = Duration::from_millis(1_200);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(2_000);
 const MAX_FETCHES: usize = 12;
 const MAX_SOCKETS: usize = 3;
-/// Render ticks at 400ms. A port-4028 connect that never answers is dropped.
-const SOCKET_TICKS: u32 = 12;
+/// A port-4028 connect that never answers is dropped after this many seconds.
+const SOCKET_GIVE_UP_SECS: u32 = 2;
 const FRAME_MS: u32 = 400;
 const POLL_MS: u32 = 8_000;
 /// Hashrate values refresh with the poll. Card and summary order does not.
@@ -47,16 +47,26 @@ const ALARM_SOUNDS: &[(&str, &str)] = &[
 ];
 const ALARM_DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const SHARE_FLASH_MS: u32 = 420;
-const LED_RUN_MS: u32 = 24_000;
-const LED_REARM_MS: u32 = 20_000;
+/// Saved chart history is flushed on this cadence, not every poll.
+const CHART_SAVE_SECS: i64 = 600;
+/// LAN port the HashWatcher app uses. The Deck admin API is not a channel.
+const WIDGET_HTTP_PORT: u16 = 8765;
+const BOS_USER: &str = "{{ credential.bos.username }}";
+const BOS_PASS: &str = "{{ credential.bos.password }}";
+const VNISH_PASS: &str = "{{ credential.vnish.password }}";
 const FLEET_COLUMNS: usize = 4;
 const FLEET_CARD_H: f32 = 122.0;
 const FLEET_GROUP_H: f32 = 150.0;
 const FLEET_GAP: f32 = 6.0;
 const FLEET_PAD: f32 = 6.0;
 const FLEET_HEADER_H: f32 = 64.0;
+/// Neural Net shows the top bar, then hides it.
+const NEURAL_BAR_MS: u32 = 4_000;
+/// One pass of the rainbow chase. The Deck paints that pass in one color,
+/// so the next pass starts on the next hue and LEDs outside the chase stay off.
+const RAINBOW_STEP_MS: u32 = 280;
 const FLEET_METRICS_H: f32 = 86.0;
-/// iOS chrome gray (0.16) behind the Hash Watcher / Fleet / Neural / settings row.
+/// iOS chrome gray (0.16) behind the Hash Watcher / Neural Net / Fleet / settings row.
 const BAR_FILL: Color = Color::from_rgb(41, 41, 41);
 const METRIC_FILL: Color = Color::from_rgb(54, 54, 54);
 /// Fleet totals sit on a near-black band so they do not read as another miner row.
@@ -65,11 +75,11 @@ const LABEL: Color = Color::from_hex(0x9E_9E_9E);
 const SHARE_ORANGE: Color = Color::from_hex(0xFF_9F_0A);
 
 const EMERALD_BG: Bitmap = include_bitmap!("assets/emeraldtheme.jpg");
+const SHARE_SOUND: bmc_wasm_sdk::Audio = include_audio!("assets/coin.mp3");
 const GEAR_ICON: Bitmap = include_bitmap!("assets/gear.png");
-const DOWNLOAD_QR: Bitmap = include_bitmap!("assets/hashwatcher-qr.png");
-const SUPPORT_QR: Bitmap = include_bitmap!("assets/support-qr.png");
 /// Deck settings release. Bump this on each update. The support QR emails the same value.
-const DECK_VERSION: &str = "1.0.3";
+const DECK_VERSION: &str = "1.0.4";
+const DOWNLOAD_URL: &str = "https://www.hashwatcher.app";
 /// First look is a minute after start, then once an hour. Outbound Data must be on.
 const UPDATE_FIRST_MS: u32 = 60_000;
 const UPDATE_EVERY_MS: u32 = 3_600_000;
@@ -97,26 +107,9 @@ const NODE_IDLE: Bitmap = include_bitmap!("assets/node-rough-idle.png");
 const CONTROL_PAUSE: Bitmap = include_bitmap!("assets/control-pause.png");
 const CONTROL_RESUME: Bitmap = include_bitmap!("assets/control-resume.png");
 const CONTROL_RESTART: Bitmap = include_bitmap!("assets/control-restart.png");
-const CLOCK_H: f32 = 184.0;
-const CLOCK_0: Bitmap = include_bitmap!("assets/clock/0.png");
-const CLOCK_1: Bitmap = include_bitmap!("assets/clock/1.png");
-const CLOCK_2: Bitmap = include_bitmap!("assets/clock/2.png");
-const CLOCK_3: Bitmap = include_bitmap!("assets/clock/3.png");
-const CLOCK_4: Bitmap = include_bitmap!("assets/clock/4.png");
-const CLOCK_5: Bitmap = include_bitmap!("assets/clock/5.png");
-const CLOCK_6: Bitmap = include_bitmap!("assets/clock/6.png");
-const CLOCK_7: Bitmap = include_bitmap!("assets/clock/7.png");
-const CLOCK_8: Bitmap = include_bitmap!("assets/clock/8.png");
-const CLOCK_9: Bitmap = include_bitmap!("assets/clock/9.png");
-const CLOCK_COLON: Bitmap = include_bitmap!("assets/clock/colon.png");
-const CLOCK_A: Bitmap = include_bitmap!("assets/clock/A.png");
-const CLOCK_M: Bitmap = include_bitmap!("assets/clock/M.png");
-const CLOCK_P: Bitmap = include_bitmap!("assets/clock/P.png");
 const BEST_DIFF_IMG: Bitmap = include_bitmap!("assets/best-diff.png");
 const BEST_DIFF_ALT: Bitmap = include_bitmap!("assets/best-diff-alt.png");
 const BLOCK_FOUND_IMG: Bitmap = include_bitmap!("assets/block-found.png");
-/// Deck speaker listener for the share coin.
-const COIN_PORT: u16 = 19721;
 /// iOS neural card gray (white 0.13 at 95%).
 const NEURAL_FILL: Color = Color::from_rgba(33, 33, 33, 242);
 const POSTER_BG: Color = Color::from_rgb(22, 4, 6);
@@ -135,7 +128,7 @@ const POOLS_CMD: &[u8] = b"{\"command\":\"pools\"}\n";
 const TEMPS_CMD: &[u8] = b"{\"command\":\"temps\"}\n";
 const FANS_CMD: &[u8] = b"{\"command\":\"fans\"}\n";
 const OUTBOUND_WEATHER_ERROR: &str =
-    "Outbound traffic is turned off. It is used only for weather data.";
+    "Outbound traffic is turned off. Weather and the version check stay off.";
 
 thread_local! {
     static APP: RefCell<App> = RefCell::new(App::new());
@@ -225,8 +218,7 @@ struct App {
     chart_open: bool,
     chart_span: u8,
     chart_saved: i64,
-    /// Open read of one Braiins miner's chart history.
-    chart_pull: Option<ChartPull>,
+    chart_fetch: Option<u32>,
     chart_ip: String,
     chart_window: u8,
     /// Unix time before the next history read for `chart_ip`.
@@ -286,6 +278,7 @@ struct App {
     idle_ms: u32,
     swallow_touch: bool,
     brightness: u8,
+    brightness_push: bool,
     night_brightness: u8,
     screen_off_secs: Option<u32>,
     screen_off_known: bool,
@@ -348,6 +341,15 @@ struct App {
     tailscale_hold_ms: u32,
     /// 0 menu, 1 display, 2 RGB, 3 layout, 4 alerts, 5 refresh, 6 support.
     settings_page: u8,
+    pair_code: String,
+    /// A phone has authenticated with the pairing code at least once.
+    phone_paired: bool,
+    tailscale_token: String,
+    /// Show the companion install steps on the remote monitoring screen.
+    tailscale_install: bool,
+    /// `ip\taction` waiting for the confirm modal.
+    pending_action: String,
+    http_started: bool,
 }
 
 #[derive(Clone)]
@@ -477,6 +479,8 @@ struct Miner {
     chart_remote: bool,
     /// Current Harlo-OS is /api/telemetry. Older firmware stays on /api/v1/status.
     harlo_legacy: bool,
+    /// Hammer v2 is /v2/miner/status. Older firmware stays on /system/info.
+    hammer_legacy: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -504,14 +508,6 @@ const BRAIINS_CHART_SPANS: [(i64, &str); 4] = [
     (7 * 24 * 60 * 60, "7 days"),
 ];
 
-struct ChartPull {
-    socket: Socket,
-    ip: String,
-    window: u8,
-    raw: Vec<u8>,
-    started: i64,
-}
-
 impl App {
     fn new() -> Self {
         Self {
@@ -530,7 +526,7 @@ impl App {
             chart_open: false,
             chart_span: 0,
             chart_saved: 0,
-            chart_pull: None,
+            chart_fetch: None,
             chart_ip: String::new(),
             chart_window: 0,
             chart_next: 0,
@@ -584,6 +580,7 @@ impl App {
             idle_ms: 0,
             swallow_touch: false,
             brightness: 0,
+            brightness_push: false,
             night_brightness: 0,
             screen_off_secs: None,
             screen_off_known: false,
@@ -640,12 +637,47 @@ impl App {
             tailscale_hold: String::new(),
             tailscale_hold_ms: 0,
             settings_page: 0,
+            pair_code: String::new(),
+            phone_paired: false,
+            tailscale_token: String::new(),
+            tailscale_install: false,
+            pending_action: String::new(),
+            http_started: false,
         }
     }
 
     fn begin(&mut self) {
         self.load_saver();
+        self.ensure_pair();
+        self.phone_paired = bmc_wasm_sdk::kv::get_string("phone_paired").as_deref() == Some("1");
+        self.start_http();
         self.apply_inventory();
+        self.apply_deck_controls();
+    }
+
+    fn ensure_pair(&mut self) {
+        if let Some(text) = bmc_wasm_sdk::kv::get_string("pair_code") {
+            let digits = text.trim();
+            if digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                self.pair_code = digits.to_owned();
+                return;
+            }
+        }
+        let mixed = (SystemTime::now().unix_secs as u64)
+            .wrapping_mul(0x9E37_79B1)
+            .rotate_left(7)
+            ^ 0xA5A5_5A5A;
+        let code = format!("{:06}", mixed % 1_000_000);
+        bmc_wasm_sdk::kv::set("pair_code", code.as_bytes());
+        self.pair_code = code;
+    }
+
+    fn start_http(&mut self) {
+        if self.http_started {
+            return;
+        }
+        let listener = bmc_wasm_sdk::http_listener::http_listen(WIDGET_HTTP_PORT, on_widget_http);
+        self.http_started = listener.port() != 0;
     }
 
     fn load_saver(&mut self) {
@@ -702,11 +734,22 @@ impl App {
                 self.summary_cols = [parsed[0], parsed[1], parsed[2], parsed[3]];
             }
         }
+        if let Some(text) = bmc_wasm_sdk::kv::get_string("tailscale_token") {
+            let token = text.trim();
+            if !token.is_empty() {
+                self.tailscale_token = token.to_owned();
+            }
+        }
+        if bmc_wasm_sdk::kv::get_string("outbound").is_none() {
+            if let Some(on) = bmc_wasm_sdk::params::current().get_bool("outbound") {
+                self.outbound = on;
+            }
+        }
     }
 
     fn flush_charts(&mut self, force: bool) {
         let now = SystemTime::now().unix_secs;
-        if !force && now.saturating_sub(self.chart_saved) < 60 {
+        if !force && now.saturating_sub(self.chart_saved) < CHART_SAVE_SECS {
             return;
         }
         if !self.miners.iter().any(|miner| miner.chart_dirty) {
@@ -754,7 +797,44 @@ impl App {
             .collect::<Vec<_>>()
             .join(",");
         bmc_wasm_sdk::kv::set("summary_cols", cols.as_bytes());
+        let mut wire = self.controls_wire();
+        if let Some(saved) = bmc_wasm_sdk::kv::get_string("controls") {
+            for part in saved.split(';') {
+                let Some((key, value)) = part.split_once('=') else {
+                    continue;
+                };
+                if key == "pm" && !value.is_empty() && !wire.split(';').any(|item| item.trim_start().starts_with("pm=")) {
+                    wire.push(';');
+                    wire.push_str(part.trim());
+                }
+            }
+        }
+        bmc_wasm_sdk::kv::set("controls", wire.as_bytes());
         self.touch_controls();
+    }
+
+    fn forget_charts(&self, kept: &[Miner]) {
+        let previous = bmc_wasm_sdk::kv::get_string("chart-ips").unwrap_or_default();
+        let mut next = Vec::new();
+        for ip in previous.split('\n') {
+            let ip = ip.trim();
+            if ip.is_empty() {
+                continue;
+            }
+            if kept.iter().any(|miner| miner.ip == ip) {
+                if !next.iter().any(|item: &String| item == ip) {
+                    next.push(ip.to_owned());
+                }
+            } else {
+                bmc_wasm_sdk::kv::delete(&format!("chart-{ip}"));
+            }
+        }
+        for miner in kept {
+            if !next.iter().any(|item| item == &miner.ip) {
+                next.push(miner.ip.clone());
+            }
+        }
+        bmc_wasm_sdk::kv::set("chart-ips", next.join("\n").as_bytes());
     }
 
     fn touch_controls(&mut self) {
@@ -776,8 +856,8 @@ impl App {
             self.own = Some(own);
         }
         let imported = imported_miners(self.own);
-        self.apply_deck_controls();
         if imported.is_empty() {
+            self.forget_charts(&[]);
             self.miners.clear();
             self.selected = None;
             self.phase = Phase::NeedNetwork;
@@ -821,6 +901,7 @@ impl App {
                 record.chart_dirty = existing.chart_dirty;
                 record.chart_remote = existing.chart_remote;
                 record.harlo_legacy = existing.harlo_legacy;
+                record.hammer_legacy = existing.hammer_legacy;
                 if record.model.is_empty() {
                     record.model = existing.model.clone();
                 }
@@ -834,6 +915,7 @@ impl App {
             next.push(record);
         }
         next.sort_by(|left, right| left.ip.cmp(&right.ip));
+        self.forget_charts(&next);
         self.miners = next;
         self.phase = Phase::Live;
         self.message = format!("{} from HashWatcher", self.miners.len());
@@ -913,16 +995,16 @@ impl App {
     }
 
     fn apply_deck_controls(&mut self) {
-        let snap = bmc_wasm_sdk::params::current();
-        let Some(raw) = snap.get_str("deck") else {
-            return;
-        };
-        let raw = raw.trim();
+        let owned = saved_controls();
+        self.apply_control_text(&owned);
+    }
+
+    fn apply_control_text(&mut self, incoming: &str) {
+        let raw = incoming.trim();
         if raw.is_empty() || raw == self.controls_remote {
             return;
         }
         self.applying_remote = true;
-        let mut brightness = None;
         let mut led = None;
         let mut city = None;
         let mut latitude = None;
@@ -957,15 +1039,22 @@ impl App {
                 "pulse" => self.share_pulse = value != "0",
                 "unit" => self.weather_f = !value.eq_ignore_ascii_case("c"),
                 "bright" => {
-                    if let Ok(percent) = value.parse::<u8>() {
-                        brightness = Some(snap_brightness_pct(percent));
+                    if let Ok(pct) = value.parse::<u8>() {
+                        let pct = pct.clamp(10, 100);
+                        if pct != self.brightness {
+                            self.brightness = pct;
+                            self.brightness_push = true;
+                        }
                     }
                 }
                 "saver" => {
                     if let Ok(seconds) = value.parse::<u32>() {
-                        self.saver_ms = seconds.saturating_mul(1_000);
-                        self.idle_ms = 0;
-                        self.saver_on = false;
+                        let next = seconds.saturating_mul(1_000);
+                        if next != self.saver_ms {
+                            self.saver_ms = next;
+                            self.idle_ms = 0;
+                            self.saver_on = false;
+                        }
                     }
                 }
                 "mode" => self.saver_mode = SaverMode::parse(value),
@@ -974,7 +1063,11 @@ impl App {
                 "city" => city = Some(value.trim().to_owned()),
                 "lat" => latitude = value.parse::<f64>().ok(),
                 "lon" => longitude = value.parse::<f64>().ok(),
-                "view" => self.apply_remote_view(value),
+                "view" => {
+                    if value != payload_value(&self.controls_remote, "view") {
+                        self.apply_remote_view(value);
+                    }
+                }
                 "names" => {
                     self.label_mode = match value {
                         "0" => 2,
@@ -983,16 +1076,14 @@ impl App {
                     };
                 }
                 "groups" => {
-                    self.fleet_groups = value == "1";
-                    self.fleet_row = 0;
+                    let next = value == "1";
+                    if next != self.fleet_groups {
+                        self.fleet_groups = next;
+                        self.fleet_row = 0;
+                    }
                 }
                 _ => {}
             }
-        }
-        if let Some(percent) = brightness {
-            self.brightness = percent;
-            self.night_brightness = percent;
-            self.push_brightness();
         }
         let incoming_city = city.clone().unwrap_or_default();
         let previous_city = payload_value(&self.controls_remote, "city");
@@ -1067,6 +1158,9 @@ impl App {
         self.applying_remote = false;
         self.controls_remote = raw.to_owned();
         self.controls_dirty = stale_city;
+        if self.brightness_push {
+            self.push_brightness();
+        }
     }
 
     /// Phone custom mode: `effect:RRGGBB`, for example `breathe:FF5000`.
@@ -1112,17 +1206,13 @@ impl App {
     }
 
     fn apply_remote_view(&mut self, value: &str) {
-        self.settings = false;
-        self.saver_on = false;
-        self.selected = None;
-        self.idle_ms = 0;
         match value {
             "neural" => {
                 let entering = !self.neural || self.summary;
                 self.neural = true;
                 self.summary = false;
                 if entering {
-                    self.neural_hint_ms = 2_450;
+                    self.neural_hint_ms = NEURAL_BAR_MS;
                 }
             }
             "summary" => {
@@ -1157,10 +1247,7 @@ impl App {
                 break;
             };
             let url = self.url_for(&probe);
-            let timeout = match probe.kind {
-                ProbeKind::Poll | ProbeKind::Detail | ProbeKind::Login => Duration::from_millis(4_000),
-                _ => PROBE_TIMEOUT,
-            };
+            let timeout = PROBE_TIMEOUT;
             let creds = self.miners.iter().find(|miner| miner.host == probe.host).map(|miner| {
                 (miner.family, miner.user.clone(), miner.pass.clone(), miner.token.clone())
             });
@@ -1170,7 +1257,9 @@ impl App {
             }
             let body = if probe.kind == ProbeKind::Login {
                 if family == "vnish" {
-                    format!(r#"{{"pw":"{}"}}"#, json_escape(&pass))
+                    format!(r#"{{"pw":"{VNISH_PASS}"}}"#)
+                } else if family == "braiins" {
+                    format!(r#"{{"username":"{BOS_USER}","password":"{BOS_PASS}"}}"#)
                 } else {
                     format!(
                         r#"{{"username":"{}","password":"{}"}}"#,
@@ -1282,7 +1371,7 @@ impl App {
             socket.0.to_wire(),
             SocketJob {
                 host,
-                started: TICK.get(),
+                started: unix_now_secs(),
                 connected: false,
                 poll: true,
                 control: false,
@@ -1387,6 +1476,18 @@ impl App {
             .unwrap_or("");
         let path = match family {
             "bitaxe" => "/api/system/info",
+            "hammer" => {
+                if self
+                    .miners
+                    .iter()
+                    .find(|miner| miner.host == host)
+                    .is_some_and(|miner| miner.hammer_legacy)
+                {
+                    "/system/info"
+                } else {
+                    "/v2/miner/status"
+                }
+            }
             "harlo" => {
                 if self
                     .miners
@@ -1417,105 +1518,6 @@ impl App {
             return miner.ip.clone();
         }
         format!("{}{host}", self.prefix)
-    }
-
-    fn poll_deck(&mut self, delta_ms: u32) {
-        if self.brightness_drag {
-            return;
-        }
-        if self.deck_fetch.is_some() {
-            return;
-        }
-        if self.controls_dirty && !self.deck_token.is_empty() {
-            if self.sync_retry_ms > 0 {
-                self.sync_retry_ms = self.sync_retry_ms.saturating_sub(delta_ms.min(2_000));
-            } else {
-                self.publish_controls();
-                return;
-            }
-        }
-        self.deck_wait_ms = self.deck_wait_ms.saturating_add(delta_ms.min(2_000));
-        let due = if self.deck_token.is_empty() { 8_000 } else { 30_000 };
-        if self.deck_wait_ms < due {
-            return;
-        }
-        self.deck_wait_ms = 0;
-        if self.deck_token.is_empty() {
-            self.deck_login();
-        } else {
-            self.deck_read();
-        }
-    }
-
-    fn deck_login(&mut self) {
-        self.deck_send(1, "/braiins.bmc.web.AuthenticationService/Login", grpc_frame(&[]), false);
-    }
-
-    fn deck_read(&mut self) {
-        self.deck_send(2, "/braiins.bmc.web.ConfigurationService/GetDisplaySettings", grpc_frame(&[]), true);
-    }
-
-    fn push_brightness(&mut self) {
-        if self.deck_token.is_empty() || self.deck_fetch.is_some() {
-            return;
-        }
-        let night = deck_night();
-        let pct = if night { self.night_brightness } else { self.brightness };
-        if pct < 10 {
-            return;
-        }
-        let path = if night {
-            "/braiins.bmc.web.ConfigurationService/SetBrightnessNightmode"
-        } else {
-            "/braiins.bmc.web.ConfigurationService/SetBrightness"
-        };
-        self.deck_send(3, path, grpc_frame(&uint32_value(u32::from(pct))), true);
-    }
-
-    fn deck_send(&mut self, kind: u8, path: &str, body: Vec<u8>, authed: bool) {
-        let headers = if authed {
-            format!(
-                "Content-Type: application/grpc-web+proto\nX-Grpc-Web: 1\nCookie: session_id={}",
-                self.deck_token
-            )
-        } else {
-            "Content-Type: application/grpc-web+proto\nX-Grpc-Web: 1".to_owned()
-        };
-        let Some(id) = FetchRequest::post(&format!("http://127.0.0.1{path}"))
-            .headers(&headers)
-            .body(&body)
-            .timeout(Duration::from_millis(2_500))
-            .send(on_fetch)
-        else {
-            return;
-        };
-        self.deck_fetch = Some(id.to_wire());
-        self.deck_kind = kind;
-    }
-
-    fn publish_controls(&mut self) {
-        if self.sync_widget.is_empty() || self.sync_scene.is_empty() {
-            self.deck_send(
-                6,
-                "/braiins.bmc.web.SceneManagementService/GetScenes",
-                grpc_frame(&[]),
-                true,
-            );
-            return;
-        }
-        let wire = self.controls_wire();
-        if wire == self.controls_remote {
-            self.controls_dirty = false;
-            return;
-        }
-        self.controls_pending = wire.clone();
-        let body = widget_update(&self.sync_widget, &self.sync_scene, &wire);
-        self.deck_send(
-            7,
-            "/braiins.bmc.web.SceneManagementService/UpdateWidget",
-            grpc_frame(&body),
-            true,
-        );
     }
 
     fn controls_wire(&self) -> String {
@@ -1574,10 +1576,6 @@ impl App {
             format!("groups={}", if self.fleet_groups { "1" } else { "0" }),
             format!("out={}", if self.outbound { "1" } else { "0" }),
         ];
-        let bright = shown_brightness(self);
-        if bright >= 10 {
-            fields.insert(5, format!("bright={bright}"));
-        }
         if !city.is_empty() && self.weather.lat.is_finite() && self.weather.lon.is_finite() {
             fields.push(format!("lat={:.4}", self.weather.lat));
             fields.push(format!("lon={:.4}", self.weather.lon));
@@ -1657,7 +1655,15 @@ impl App {
         if self.tailscale_cmd.is_some() {
             return;
         }
-        let url = format!("http://127.0.0.1:9418/cgi-bin/action?{action}");
+        if self.tailscale_token.is_empty() {
+            self.notice = "Install Tailscale, then try again.".to_owned();
+            self.tailscale_install = true;
+            return;
+        }
+        let url = format!(
+            "http://127.0.0.1:9418/cgi-bin/action?{action}&token={}",
+            self.tailscale_token
+        );
         let Some(id) = FetchRequest::get(&url)
             .timeout(Duration::from_millis(2_000))
             .send(on_fetch)
@@ -1694,76 +1700,20 @@ impl App {
         self.tailscale_wait_ms = 0;
     }
 
-    fn finish_deck(&mut self, response: &FetchResponse) {
-        let kind = self.deck_kind;
-        self.deck_kind = 0;
-        if !response.ok() {
-            if kind == 4 {
-                self.notice = "Alarm was not saved".to_owned();
-            }
-            if kind != 1 && kind != 4 && kind != 5 {
-                self.deck_token.clear();
-                self.deck_wait_ms = 8_000;
-            }
+    fn handle_http(&mut self, response: &FetchResponse) {
+        if self.deck_fetch == Some(response.request_id.to_wire()) {
+            self.deck_fetch = None;
+            self.finish_deck(response);
             return;
         }
-        let msg = grpc_message(response.body());
-        match kind {
-            1 => {
-                if let Some(token) = proto_string(msg, 1) {
-                    if !token.is_empty() {
-                        self.deck_token = token;
-                        self.deck_wait_ms = 30_000;
-                        self.deck_flush_alarm();
-                    }
-                }
-            }
-            2 => self.apply_display(msg),
-            6 => {
-                if let Some((scene, widget)) = find_hashwatcher_widget(msg) {
-                    self.sync_scene = scene;
-                    self.sync_widget = widget;
-                    self.sync_retry_ms = 0;
-                } else {
-                    self.sync_retry_ms = 8_000;
-                }
-            }
-            7 => {
-                self.controls_remote = self.controls_pending.clone();
-                self.controls_dirty = self.controls_wire() != self.controls_remote;
-            }
-            4 => {
-                self.notice = "Alarm added".to_owned();
-                self.alarm_open = false;
-            }
-            _ => {}
-        }
-    }
-
-    fn apply_display(&mut self, msg: &[u8]) {
-        if !self.brightness_drag {
-            if let Some(day) = proto_bytes(msg, 1).and_then(|nested| proto_varint(nested, 1)) {
-                self.brightness = day.clamp(10, 100) as u8;
-            }
-            if let Some(night) = proto_bytes(msg, 2).and_then(|nested| proto_varint(nested, 1)) {
-                self.night_brightness = night.clamp(10, 100) as u8;
-            }
-        }
-        self.screen_off_known = true;
-        self.screen_off_secs = proto_bytes(msg, 5)
-            .and_then(|nested| proto_varint(nested, 1))
-            .map(|value| value as u32);
-    }
-
-    fn handle_http(&mut self, response: &FetchResponse) {
         if self.zec_fetch == Some(response.request_id.to_wire()) {
             self.zec_fetch = None;
             self.finish_zec(response);
             return;
         }
-        if self.deck_fetch == Some(response.request_id.to_wire()) {
-            self.deck_fetch = None;
-            self.finish_deck(response);
+        if self.chart_fetch == Some(response.request_id.to_wire()) {
+            self.chart_fetch = None;
+            self.finish_chart_fetch(response);
             return;
         }
         if self.tailscale_fetch == Some(response.request_id.to_wire()) {
@@ -1882,19 +1832,34 @@ impl App {
                     }
                 } else {
                 let mut detail = false;
+                let mut hammer_fallback = false;
                 if alive {
                     if let Some(miner) = self.miners.iter_mut().find(|miner| miner.host == probe.host) {
-                        apply_http_poll(miner, text, &doc);
-                        detail = miner.family == "harlo"
-                            && (miner.model.is_empty() || miner.harlo_legacy)
-                            || (miner.family == "luckyMiner" && !has_reading(miner))
-                            || (miner.family == "bitaxe"
-                                && miner.hashrate_ths.is_none()
-                                && miner.temp_c.is_none());
+                        if miner.family == "hammer"
+                            && !miner.hammer_legacy
+                            && hammer_v2_unusable(status, text, &doc)
+                        {
+                            miner.hammer_legacy = true;
+                            hammer_fallback = true;
+                        } else {
+                            apply_http_poll(miner, text, &doc);
+                            detail = miner.family == "harlo"
+                                && (miner.model.is_empty() || miner.harlo_legacy)
+                                || (miner.family == "luckyMiner" && !has_reading(miner))
+                                || (miner.family == "bitaxe"
+                                    && miner.hashrate_ths.is_none()
+                                    && miner.temp_c.is_none());
+                        }
                     }
                 } else if let Some(miner) = self.miners.iter_mut().find(|miner| miner.host == probe.host)
                 {
                     note_miss(miner);
+                }
+                if hammer_fallback {
+                    self.queue.push_front(Probe {
+                        host: probe.host,
+                        kind: ProbeKind::Poll,
+                    });
                 }
                 if detail {
                     self.queue_detail(probe.host);
@@ -1950,6 +1915,7 @@ impl App {
             return;
         }
         let Some(ip) = self.selected.clone() else {
+            self.stop_chart_pull();
             return;
         };
         let braiins = self
@@ -1960,27 +1926,11 @@ impl App {
             self.stop_chart_pull();
             return;
         }
-        let window = braiins_graph_window(self.chart_span as usize);
-        let now = SystemTime::now().unix_secs;
-        let pull_state = self.chart_pull.as_ref().map(|pull| {
-            (
-                pull.ip == ip && pull.window == window,
-                now.saturating_sub(pull.started) < 8,
-            )
-        });
-        if pull_state == Some((true, true)) {
+        if self.chart_fetch.is_some() {
             return;
         }
-        if pull_state.is_some() {
-            let stale = self.chart_pull.take().expect("chart pull");
-            let same = stale.ip == ip && stale.window == window;
-            let (samples, _) = graph_samples(&stale.raw).unwrap_or((Vec::new(), true));
-            stale.socket.close();
-            if same {
-                self.finish_graph(&ip, window, samples);
-                return;
-            }
-        }
+        let window = braiins_graph_window(self.chart_span as usize);
+        let now = SystemTime::now().unix_secs;
         let fresh = self.chart_ip == ip && self.chart_window == window && now < self.chart_next;
         let have_remote = self
             .miners
@@ -1989,78 +1939,46 @@ impl App {
         if fresh && have_remote {
             return;
         }
-        let Some(sock) = socket::tcp_connect(&ip, 80, on_socket) else {
-            self.chart_ip = ip;
+        let frame = grpc_frame(&[0x08, window]);
+        let url = format!("http://{ip}/braiins.boser.web.PersistentGraphsService/Subscribe");
+        let Some(id) = FetchRequest::post(&url)
+            .headers("Content-Type: application/grpc-web+proto\nAccept: application/grpc-web+proto\nX-Grpc-Web: 1")
+            .body(&frame)
+            .timeout(Duration::from_secs(8))
+            .send(on_fetch)
+        else {
+            self.chart_ip = ip.clone();
             self.chart_window = window;
             self.chart_next = now + 20;
             return;
         };
-        self.chart_pull = Some(ChartPull {
-            socket: sock,
-            ip,
-            window,
-            raw: Vec::new(),
-            started: now,
-        });
+        self.chart_fetch = Some(id.to_wire());
+        self.chart_ip = ip;
+        self.chart_window = window;
     }
 
     fn stop_chart_pull(&mut self) {
-        if let Some(pull) = self.chart_pull.take() {
-            pull.socket.close();
-        }
+        Self::cancel_fetch(&mut self.chart_fetch);
     }
 
-    fn handle_chart_socket(&mut self, socket: Socket, event: &SocketEvent<'_>) {
-        match event {
-            SocketEvent::Connected => {
-                let Some(pull) = &self.chart_pull else {
-                    return;
-                };
-                let request = graph_request(&pull.ip, pull.window);
-                socket.write(&request);
-            }
-            SocketEvent::Data(data) => {
-                let Some(pull) = self.chart_pull.as_mut() else {
-                    return;
-                };
-                pull.raw.extend_from_slice(data);
-                if pull.raw.len() > 256 * 1024 {
-                    pull.raw.truncate(256 * 1024);
-                }
-                let raw = pull.raw.clone();
-                let ip = pull.ip.clone();
-                let window = pull.window;
-                let Some((samples, done)) = graph_samples(&raw) else {
-                    return;
-                };
-                if !done && samples.len() < 300 {
-                    return;
-                }
-                self.chart_pull = None;
-                self.finish_graph(&ip, window, samples);
-                socket.close();
-            }
-            SocketEvent::Closed(_) => {
-                let Some(pull) = self.chart_pull.take() else {
-                    return;
-                };
-                if pull.socket.0.to_wire() != socket.0.to_wire() {
-                    self.chart_pull = Some(pull);
-                    return;
-                }
-                let (samples, _) = graph_samples(&pull.raw).unwrap_or((Vec::new(), true));
-                self.finish_graph(&pull.ip, pull.window, samples);
-            }
+    fn finish_chart_fetch(&mut self, response: &FetchResponse) {
+        let ip = self.chart_ip.clone();
+        let window = self.chart_window;
+        if !response.ok() || ip.is_empty() {
+            self.chart_next = SystemTime::now().unix_secs + 20;
+            return;
         }
+        self.finish_graph(&ip, window, chart_samples_from_body(response.body()));
     }
 
     fn finish_graph(&mut self, ip: &str, window: u8, samples: Vec<ChartSample>) {
         let now = SystemTime::now().unix_secs;
         self.chart_ip = ip.to_owned();
         self.chart_window = window;
-        self.chart_next = now + braiins_graph_refresh(window);
+        let wait = if self.chart_open { 8 } else { braiins_graph_refresh(window) };
+        self.chart_next = now + wait;
         if samples.is_empty() {
-            self.chart_next = now + 20;
+            self.chart_next = now + if self.chart_open { 8 } else { 20 };
             return;
         }
         if let Some(miner) = self.miners.iter_mut().find(|miner| miner.ip == ip) {
@@ -2072,10 +1990,6 @@ impl App {
 
     fn handle_socket(&mut self, socket: Socket, event: &SocketEvent<'_>) {
         let id = socket.0.to_wire();
-        if self.chart_pull.as_ref().is_some_and(|pull| pull.socket.0.to_wire() == id) {
-            self.handle_chart_socket(socket, event);
-            return;
-        }
         if self.sound_socket.is_some_and(|sound| sound.0.to_wire() == id) {
             match event {
                 SocketEvent::Connected => {
@@ -2202,11 +2116,11 @@ impl App {
     }
 
     fn reap_sockets(&mut self) {
-        let now = TICK.get();
+        let now = unix_now_secs();
         let stale: Vec<u32> = self
             .sockets
             .iter()
-            .filter(|(_, job)| now.saturating_sub(job.started) >= SOCKET_TICKS)
+            .filter(|(_, job)| now.saturating_sub(job.started) >= SOCKET_GIVE_UP_SECS)
             .map(|(id, _)| *id)
             .collect();
         for id in stale {
@@ -2337,6 +2251,29 @@ impl App {
     }
 
     fn handle_click(&mut self, id: &str) -> bool {
+        if id == "confirm-miner::primary" {
+            let pending = std::mem::take(&mut self.pending_action);
+            let Some((ip, action)) = pending.split_once('\t') else {
+                return true;
+            };
+            if action.starts_with("fan-") {
+                if let Some(stored) = self.miners.iter_mut().find(|item| item.ip == ip) {
+                    stored.fan_manual = action != "fan-auto";
+                }
+            }
+            let Some(miner) = self.miners.iter().find(|item| item.ip == ip).cloned() else {
+                return true;
+            };
+            self.apply_miner_action(&miner, action);
+            return true;
+        }
+        if id == "confirm-miner::secondary" || id == "confirm-miner::close" {
+            self.pending_action.clear();
+            return true;
+        }
+        if !self.pending_action.is_empty() {
+            return true;
+        }
         if self.celebration.is_some() {
             if id == "best-awesome" {
                 self.celebration = None;
@@ -2369,7 +2306,7 @@ impl App {
             self.summary = false;
             self.settings = false;
             if entering {
-                self.neural_hint_ms = 2_450;
+                self.neural_hint_ms = NEURAL_BAR_MS;
             }
             return true;
         }
@@ -2460,6 +2397,10 @@ impl App {
         }
         if id == "tailscale-reset" {
             self.tailscale_command("reset");
+            return true;
+        }
+        if id == "tailscale-install" {
+            self.tailscale_install = !self.tailscale_install;
             return true;
         }
         if self.handle_alarm(id) {
@@ -2718,15 +2659,16 @@ impl App {
         else {
             return false;
         };
-        if id == "fan-manual" || id.starts_with("fan-") {
+        if id == "fan-manual" {
             if let Some(stored) = self.miners.iter_mut().find(|item| item.ip == miner.ip) {
-                if id == "fan-manual" {
-                    stored.fan_manual = true;
-                    self.notice = "Pick a fan speed".to_owned();
-                    return true;
-                }
-                stored.fan_manual = id != "fan-auto";
+                stored.fan_manual = true;
             }
+            self.notice = "Pick a fan speed".to_owned();
+            return true;
+        }
+        if action_needs_confirm(id) {
+            self.pending_action = format!("{}\t{id}", miner.ip);
+            return true;
         }
         self.apply_miner_action(&miner, id)
     }
@@ -2739,7 +2681,7 @@ impl App {
             if self.celebration.is_some() {
                 return true;
             }
-            self.rainbow_ms = 1_200;
+            self.rainbow_ms = RAINBOW_STEP_MS;
             self.led_refresh_ms = 0;
             self.touch_controls();
             return true;
@@ -2863,49 +2805,11 @@ impl App {
     }
 
     fn deck_add_alarm(&mut self) {
-        if self.alarm_days == 0 {
-            self.notice = "Pick at least one day".to_owned();
-            return;
-        }
-        self.alarm_after = 1;
-        self.deck_flush_alarm();
+        self.notice = "Add alarms in the Deck settings.".to_owned();
     }
 
     fn deck_play_alarm(&mut self) {
-        self.alarm_after = 2;
-        self.deck_flush_alarm();
-    }
-
-    fn deck_flush_alarm(&mut self) {
-        if self.deck_fetch.is_some() {
-            return;
-        }
-        if self.deck_token.is_empty() {
-            self.deck_login();
-            return;
-        }
-        let after = self.alarm_after;
-        self.alarm_after = 0;
-        if after == 1 {
-            self.notice = "Saving alarm".to_owned();
-            self.deck_send(
-                4,
-                "/braiins.bmc.web.AlarmService/AddAlarm",
-                grpc_frame(&alarm_request(self)),
-                true,
-            );
-        } else if after == 2 {
-            let sound = ALARM_SOUNDS
-                .get(self.alarm_sound as usize)
-                .map(|sound| sound.0)
-                .unwrap_or(ALARM_SOUNDS[0].0);
-            self.deck_send(
-                5,
-                "/braiins.bmc.web.ConfigurationService/PlaySound",
-                grpc_frame(&proto_string_field(1, sound)),
-                true,
-            );
-        }
+        self.notice = "Play sounds from the Deck settings.".to_owned();
     }
 
     fn release_shares(&mut self) {
@@ -3033,22 +2937,78 @@ impl App {
         }
     }
 
-    fn play_share_sound(&mut self) {
-        if self.sound_volume == 0 {
+    fn push_brightness(&mut self) {
+        if self.brightness < 10 {
             return;
         }
-        if let Some(socket) = self.sound_socket {
-            if TICK.get().saturating_sub(self.sound_started) < SOCKET_TICKS {
-                return;
-            }
-            socket.close();
-            self.sound_socket = None;
+        if self.deck_fetch.is_some() {
+            self.brightness_push = true;
+            return;
         }
-        let Some(socket) = socket::tcp_connect("127.0.0.1", COIN_PORT, on_socket) else {
+        if self.deck_token.is_empty() {
+            self.brightness_push = true;
+            self.deck_login();
+            return;
+        }
+        self.brightness_push = false;
+        let path = if deck_night() {
+            "/braiins.bmc.web.ConfigurationService/SetBrightnessNightmode"
+        } else {
+            "/braiins.bmc.web.ConfigurationService/SetBrightness"
+        };
+        self.deck_send(3, path, grpc_frame(&uint32_value(u32::from(self.brightness))), true);
+    }
+
+    fn deck_login(&mut self) {
+        self.deck_send(1, "/braiins.bmc.web.AuthenticationService/Login", grpc_frame(&[]), false);
+    }
+
+    fn deck_send(&mut self, kind: u8, path: &str, body: Vec<u8>, authed: bool) {
+        let headers = if authed {
+            format!(
+                "Content-Type: application/grpc-web+proto\nX-Grpc-Web: 1\nCookie: session_id={}",
+                self.deck_token
+            )
+        } else {
+            "Content-Type: application/grpc-web+proto\nX-Grpc-Web: 1".to_owned()
+        };
+        let Some(id) = FetchRequest::post(&format!("http://127.0.0.1{path}"))
+            .headers(&headers)
+            .body(&body)
+            .timeout(Duration::from_millis(2_500))
+            .send(on_fetch)
+        else {
             return;
         };
-        self.sound_socket = Some(socket);
-        self.sound_started = TICK.get();
+        self.deck_fetch = Some(id.to_wire());
+        self.deck_kind = kind;
+    }
+
+    fn finish_deck(&mut self, response: &FetchResponse) {
+        let kind = self.deck_kind;
+        self.deck_kind = 0;
+        if !response.ok() {
+            self.deck_token.clear();
+            return;
+        }
+        if kind == 1 {
+            if let Some(token) = proto_string(grpc_message(response.body()), 1) {
+                if !token.is_empty() {
+                    self.deck_token = token;
+                }
+            }
+        }
+        if self.brightness_push {
+            self.push_brightness();
+        }
+    }
+
+    fn play_share_sound(&mut self) {
+        if self.sound_volume == 0 || !self.share_sound {
+            return;
+        }
+        let id = bmc_wasm_sdk::assets::ensure_audio_registered(&SHARE_SOUND);
+        bmc_wasm_sdk::host::audio_play(id, bmc_wasm_sdk::host::Volume::new(self.sound_volume));
     }
 
     fn pulse_share_led(&mut self) {
@@ -3058,7 +3018,7 @@ impl App {
         let color = Color::from_rgba(255, 159, 10, 255);
         led::stop();
         led::set_effect(LedEffect::Breathe, color, 280, Some(SHARE_FLASH_MS));
-        led::set_effect_global(LedEffect::Breathe, color, 280, Some(SHARE_FLASH_MS));
+        self.led_refresh_ms = 1;
     }
 
     fn drive_celebration_leds(&mut self, delta_ms: u32) {
@@ -3089,7 +3049,6 @@ impl App {
     fn sweep_leds(&mut self, color: Color) {
         led::stop();
         led::set_effect(LedEffect::KnightRider, color, 280, Some(3_500));
-        led::set_effect_global(LedEffect::KnightRider, color, 280, Some(3_500));
     }
 
     fn end_celebration_leds(&mut self) {
@@ -3098,7 +3057,7 @@ impl App {
         if self.led_label == "Off" {
             led::stop();
         } else if self.led_rainbow {
-            self.rainbow_ms = 1_200;
+            self.rainbow_ms = RAINBOW_STEP_MS;
             self.led_refresh_ms = 0;
         } else {
             self.arm_led();
@@ -3130,8 +3089,7 @@ impl App {
         let color = Color::from_rgba(r, g, b, 255);
         // A running effect ignores a new color or mode until it is stopped.
         led::stop();
-        led::set_effect(self.led_effect, color, self.led_period, Some(LED_RUN_MS));
-        led::set_effect_global(self.led_effect, color, self.led_period, Some(LED_RUN_MS));
+        led::set_effect(self.led_effect, color, self.led_period, None);
     }
 
     fn drive_user_leds(&mut self, delta_ms: u32) {
@@ -3139,20 +3097,13 @@ impl App {
             return;
         }
         if self.share_flash_ms > 0 {
-            if self.led_rainbow {
-                self.rainbow_ms = 1_200;
-                self.led_refresh_ms = 0;
-            } else {
-                self.led_refresh_ms = LED_REARM_MS;
-            }
             return;
         }
         if self.led_rainbow {
             self.drive_rainbow_flash(delta_ms);
             return;
         }
-        self.led_refresh_ms = self.led_refresh_ms.saturating_add(delta_ms);
-        if self.led_refresh_ms < LED_REARM_MS {
+        if self.led_refresh_ms == 0 {
             return;
         }
         self.led_refresh_ms = 0;
@@ -3164,15 +3115,22 @@ impl App {
             return;
         }
         self.rainbow_ms = self.rainbow_ms.saturating_add(delta_ms);
-        // Same sweep as a block found: Night Rider at 280ms, new hue every 1.2s.
-        if self.led_refresh_ms != 0 && self.rainbow_ms < 1_200 {
+        if self.led_refresh_ms != 0 && self.rainbow_ms < RAINBOW_STEP_MS {
             return;
         }
-        self.rainbow_ms = 0;
+        let steps = (self.rainbow_ms / RAINBOW_STEP_MS).clamp(1, 24);
+        self.rainbow_ms %= RAINBOW_STEP_MS;
         self.led_refresh_ms = 1;
-        self.rainbow_hue = (self.rainbow_hue + 28) % 360;
+        self.rainbow_hue = self.rainbow_hue.wrapping_add(36 * (steps as u16)) % 360;
         let (red, green, blue) = hue_rgb(self.rainbow_hue);
-        self.sweep_leds(Color::from_rgba(red, green, blue, 255));
+        // Period matches the step, so replacing the effect lands on the
+        // natural wrap instead of restarting a long same-color wash.
+        led::set_effect(
+            LedEffect::Chase,
+            Color::from_rgba(red, green, blue, 255),
+            RAINBOW_STEP_MS,
+            None,
+        );
     }
 
     fn apply_miner_action(&mut self, miner: &Miner, id: &str) -> bool {
@@ -3298,7 +3256,7 @@ impl App {
         } else {
             FetchRequest::get(&url).headers(&headers)
         };
-        let Some(id) = request.timeout(Duration::from_millis(4_000)).send(on_fetch) else {
+        let Some(id) = request.timeout(Duration::from_millis(2_000)).send(on_fetch) else {
             self.notice = "Could not reach the Bitmain web login.".to_owned();
             self.zec_fan = None;
             return;
@@ -3435,7 +3393,7 @@ impl App {
             }
             "harlo" => {
                 let body = if speed == "auto" {
-                    "{\"mode\":\"auto\",\"sensor\":\"asic\",\"target_c\":55}".to_owned()
+                    "{\"mode\":\"auto\"}".to_owned()
                 } else {
                     format!("{{\"percent\":{speed}}}")
                 };
@@ -3647,7 +3605,7 @@ impl App {
             socket.0.to_wire(),
             SocketJob {
                 host,
-                started: TICK.get(),
+                started: unix_now_secs(),
                 connected: false,
                 poll: false,
                 control: true,
@@ -3714,6 +3672,7 @@ impl App {
         if !version_is_newer(&version, DECK_VERSION) {
             return;
         }
+        self.notice = format!("Updating HashWatcher to {version}.");
         let _ = FetchRequest::get("http://127.0.0.1:9418/cgi-bin/action?update")
             .timeout(Duration::from_millis(2_000))
             .send(on_fetch);
@@ -3841,7 +3800,7 @@ impl App {
             "https://geocoding-api.open-meteo.com/v1/search?name={}&count=4&language=en&format=json",
             url_query(query)
         );
-        let Some(id) = FetchRequest::get(&url).timeout(Duration::from_millis(4_000)).send(on_fetch) else {
+        let Some(id) = FetchRequest::get(&url).timeout(Duration::from_millis(2_000)).send(on_fetch) else {
             return;
         };
         self.suggest_fetch = Some(id.to_wire());
@@ -4028,9 +3987,6 @@ fn note_miss(miner: &mut Miner) {
 fn remember(miner: &mut Miner) {
     miner.reachable = true;
     miner.misses = 0;
-    if miner.chart_remote {
-        return;
-    }
     if let Some(rate) = miner.hashrate_ths {
         record_chart(miner, SystemTime::now().unix_secs, rate);
     }
@@ -4376,6 +4332,7 @@ fn apply_http_poll(miner: &mut Miner, text: &str, doc: &JsonDoc) {
     let saved_uptime = miner.uptime_s;
     match miner.family {
         "bitaxe" => apply_bitaxe(miner, doc),
+        "hammer" => apply_hammer(miner, doc),
         "harlo" => apply_harlo(miner, doc),
         "luckyMiner" => apply_lucky_overview(miner, doc),
         "braiins" => apply_braiins_stats(miner, doc),
@@ -4725,6 +4682,53 @@ fn apply_pool(miner: &mut Miner, doc: &JsonDoc) {
             miner.pool_user = user;
         }
     }
+}
+
+fn hammer_v2_unusable(status: Option<u16>, text: &str, doc: &JsonDoc) -> bool {
+    if matches!(status, Some(404 | 405)) {
+        return true;
+    }
+    let head = text.trim_start();
+    let head = head.get(..48).unwrap_or(head).to_ascii_lowercase();
+    if head.starts_with("<!doctype") || head.starts_with("<html") {
+        return true;
+    }
+    first_num(doc, &["/data/current_hashrate"]).is_none()
+        && doc.str("/data/current_hashrate").is_none()
+}
+
+fn apply_hammer(miner: &mut Miner, doc: &JsonDoc) {
+    if first_num(doc, &["/data/current_hashrate"]).is_some() || doc.str("/data/current_hashrate").is_some() {
+        // Hammer v2 reports hashes per second. The fleet view is TH/s.
+        miner.hashrate_ths = first_positive(doc, &["/data/current_hashrate"]).map(|value| value / 1_000_000_000_000.0);
+        miner.power_w = first_positive(doc, &["/data/power_consumption"]);
+        let board = first_positive(doc, &["/data/temp_board"]);
+        let board_extra = first_positive(doc, &["/data/temp_board_1"]);
+        miner.temp_c = match (board, board_extra) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
+        miner.vr_temp = first_positive(doc, &["/data/temp_vcore"]);
+        miner.shares_accepted = whole(doc, "/data/shares_accepted");
+        miner.shares_rejected = whole(doc, "/data/shares_rejected");
+        miner.frequency = first_positive(doc, &["/data/frequency"]);
+        miner.uptime_s = whole(doc, "/data/uptime_seconds");
+        if let Some(pool) = doc.str("/data/pool_url").filter(|pool| !pool.is_empty()) {
+            miner.pool = pool;
+        }
+        if let Some(user) = doc.str("/data/pool_worker").filter(|user| !user.is_empty()) {
+            miner.pool_user = user;
+        }
+        let rpm = first_positive(doc, &["/data/fan_speed_rpm"]).unwrap_or(0.0);
+        let pct = first_positive(doc, &["/data/fan_target_speed"]).unwrap_or(0.0);
+        if rpm > 0.0 || pct > 0.0 {
+            set_fan_slots(miner, &[(pct, rpm)]);
+        }
+        return;
+    }
+    apply_bitaxe(miner, doc);
 }
 
 fn apply_bitaxe(miner: &mut Miner, doc: &JsonDoc) {
@@ -5305,6 +5309,7 @@ fn blank(host: u8, ip: &str) -> Miner {
         chart_dirty: false,
         chart_remote: false,
         harlo_legacy: false,
+        hammer_legacy: false,
     }
 }
 
@@ -5475,22 +5480,300 @@ fn split_v4(ip: &str) -> Option<(String, u8)> {
     Some((format!("{a}.{b}.{c}."), host))
 }
 
-fn imported_miners(own: Option<u8>) -> Vec<Miner> {
-    let snap = params::current();
-    let mut text = String::new();
-    for key in ["inventory", "inventory2", "inventory3", "inventory4"] {
-        let Some(chunk) = snap.get_str(key) else {
+fn unix_now_secs() -> u32 {
+    SystemTime::now().unix_secs as u32
+}
+
+fn saved_controls() -> String {
+    bmc_wasm_sdk::kv::get_string("controls").unwrap_or_default()
+}
+
+fn on_widget_http(_listener: bmc_wasm_sdk::http_listener::HttpListener, req: &bmc_wasm_sdk::http_listener::HttpRequest) {
+    let (path, query) = req.path.split_once('?').unwrap_or((req.path.as_str(), ""));
+    let authed = http_authed(req, query);
+    match (req.method.as_str(), path) {
+        ("GET", "/v1/status") => {
+            let count = APP.with(|app| app.borrow().miners.len());
+            let body = format!("{{\"miners\":{count}}}");
+            http_reply(req, 200, "application/json", body.as_bytes());
+        }
+        ("POST", "/v1/inventory") if authed => {
+            let text = String::from_utf8_lossy(&req.body);
+            let redacted = redact_inventory(&text);
+            bmc_wasm_sdk::kv::set("inventory", redacted.as_bytes());
+            APP.with(|app| app.borrow_mut().apply_inventory());
+            http_reply(req, 200, "text/plain", b"ok");
+        }
+        ("GET", "/v1/inventory") if authed => {
+            let body = bmc_wasm_sdk::kv::get_string("inventory").unwrap_or_default();
+            http_reply(req, 200, "text/plain", body.as_bytes());
+        }
+        ("GET", "/v1/controls") if authed => {
+            let body = saved_controls();
+            http_reply(req, 200, "text/plain", body.as_bytes());
+        }
+        ("POST", "/v1/controls") if authed => {
+            let text = String::from_utf8_lossy(&req.body);
+            let text = text.trim();
+            bmc_wasm_sdk::kv::set("controls", text.as_bytes());
+            APP.with(|app| app.borrow_mut().apply_deck_controls());
+            http_reply(req, 200, "text/plain", b"ok");
+        }
+        ("POST", "/v1/tailscale-token") if authed => {
+            let text = String::from_utf8_lossy(&req.body);
+            let token = text.trim().strip_prefix("token=").unwrap_or(text.trim()).trim();
+            if token.is_empty() || token.len() > 128 || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+                http_reply(req, 400, "text/plain", b"bad token");
+                return;
+            }
+            bmc_wasm_sdk::kv::set("tailscale_token", token.as_bytes());
+            let owned = token.to_owned();
+            APP.with(|app| app.borrow_mut().tailscale_token = owned);
+            http_reply(req, 200, "text/plain", b"ok");
+        }
+        (_, "/v1/inventory" | "/v1/controls" | "/v1/tailscale-token") => {
+            http_reply(req, 401, "text/plain", b"pairing code required");
+        }
+        _ => http_reply(req, 404, "text/plain", b"not found"),
+    }
+    if authed
+        && matches!(req.method.as_str(), "GET" | "POST")
+        && matches!(path, "/v1/inventory" | "/v1/controls")
+    {
+        mark_phone_paired();
+    }
+    request_frame();
+}
+
+fn mark_phone_paired() {
+    let already = APP.with(|app| app.borrow().phone_paired);
+    if already {
+        return;
+    }
+    bmc_wasm_sdk::kv::set("phone_paired", b"1");
+    APP.with(|app| app.borrow_mut().phone_paired = true);
+}
+
+/// The Deck host appends one CRLF after this header block, so the block ends with CRLF and the host supplies the blank line.
+fn http_reply(req: &bmc_wasm_sdk::http_listener::HttpRequest, status: u16, content_type: &str, body: &[u8]) {
+    let headers = format!("Content-Type: {content_type}\r\n");
+    req.respond(status, &headers, body);
+}
+
+fn http_authed(req: &bmc_wasm_sdk::http_listener::HttpRequest, query: &str) -> bool {
+    let code = APP.with(|app| app.borrow().pair_code.clone());
+    if code.len() != 6 {
+        return false;
+    }
+    header_value(&req.headers, "x-hashwatcher-code") == code || query_value(query, "code") == code
+}
+
+fn header_value(headers: &str, name: &str) -> String {
+    for line in headers.split(['\n', '\r']) {
+        let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let chunk = chunk.trim();
-        if chunk.is_empty() {
+        if key.trim().eq_ignore_ascii_case(name) {
+            return value.trim().to_owned();
+        }
+    }
+    String::new()
+}
+
+fn query_value(query: &str, name: &str) -> String {
+    for part in query.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key == name {
+            return value.trim().to_owned();
+        }
+    }
+    String::new()
+}
+
+fn chart_samples_from_body(body: &[u8]) -> Vec<ChartSample> {
+    if body.starts_with(b"HTTP/") {
+        return graph_samples(body).map(|(samples, _)| samples).unwrap_or_default();
+    }
+    let mut samples = Vec::new();
+    let mut index = 0;
+    while index + 5 <= body.len() {
+        let flag = body[index];
+        let len = u32::from_be_bytes([body[index + 1], body[index + 2], body[index + 3], body[index + 4]]) as usize;
+        if len > 1_000_000 || index + 5 + len > body.len() {
+            break;
+        }
+        if flag & 0x80 != 0 || samples.len() >= 300 {
+            break;
+        }
+        if let Some(sample) = envelope_sample(&body[index + 5..index + 5 + len]) {
+            samples.push(sample);
+        }
+        index += 5 + len;
+    }
+    collapse_samples(samples)
+}
+
+fn inventory_body() -> String {
+    if let Some(saved) = bmc_wasm_sdk::kv::get_string("inventory") {
+        if !saved.trim().is_empty() {
+            return saved;
+        }
+    }
+    let redacted = redact_inventory(&inventory_param_stamp());
+    if !redacted.trim().is_empty() {
+        bmc_wasm_sdk::kv::set("inventory", redacted.as_bytes());
+    }
+    redacted
+}
+
+fn redact_inventory(text: &str) -> String {
+    let mut lines = Vec::new();
+    for line in text.split('\n') {
+        if line.trim().is_empty() {
             continue;
         }
-        if !text.is_empty() {
-            text.push('\n');
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 || parts[0].starts_with('#') {
+            lines.push(line.to_owned());
+            continue;
         }
-        text.push_str(chunk);
+        let family = family_from_type(&field_unescape(parts[2].trim()));
+        if !matches!(family, "braiins" | "vnish") {
+            lines.push(line.to_owned());
+            continue;
+        }
+        let mut fields: Vec<String> = parts.iter().map(|part| field_unescape(part.trim())).collect();
+        while fields.len() < 7 {
+            fields.push(String::new());
+        }
+        fields[5].clear();
+        fields[6].clear();
+        lines.push(fields.iter().map(|field| field_escape(field)).collect::<Vec<_>>().join("\t"));
     }
+    lines.join("\n")
+}
+
+fn field_escape(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn action_needs_confirm(id: &str) -> bool {
+    matches!(id, "act-restart" | "act-pause" | "act-resume")
+        || id.starts_with("mode-")
+        || id.starts_with("tune-")
+        || (id.starts_with("fan-") && id != "fan-manual")
+}
+
+fn confirm_copy(action: &str, miner: Option<&Miner>) -> (&'static str, String, String) {
+    if action == "act-restart" {
+        return ("Restart", "Restart this miner?".to_owned(), String::new());
+    }
+    if action == "act-pause" {
+        return ("Pause", "Pause this miner?".to_owned(), String::new());
+    }
+    if action == "act-resume" {
+        return ("Resume", "Resume this miner?".to_owned(), String::new());
+    }
+    if action == "fan-auto" {
+        return ("Fans", "Return fan control to the miner?".to_owned(), "Auto".to_owned());
+    }
+    if let Some(speed) = action.strip_prefix("fan-") {
+        return ("Fans", "Set this fan speed?".to_owned(), format!("{speed}%"));
+    }
+    if action.starts_with("mode-") {
+        let label = miner
+            .and_then(|miner| {
+                canaan_mode_buttons(miner)
+                    .into_iter()
+                    .find(|(id, _)| *id == action)
+                    .map(|(_, label)| label.to_owned())
+            })
+            .unwrap_or_else(|| "Work mode".to_owned());
+        return ("Work mode", "Change the work mode?".to_owned(), label);
+    }
+    if let Some(index) = action.strip_prefix("tune-") {
+        let label = index
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| {
+                miner.and_then(|miner| braiins_tunes(&miner.tune).get(index).map(|tune| tune.label.clone()))
+            })
+            .unwrap_or_else(|| "Tune".to_owned());
+        return ("Tune", "Apply this Braiins tune?".to_owned(), label);
+    }
+    ("Confirm", "Apply this change?".to_owned(), String::new())
+}
+
+fn confirm_layer(app: &App) -> Node {
+    use bmc_wasm_sdk::modal::{ModalAction, ModalFooter, ModalProps, modal};
+    let (ip, action) = app.pending_action.split_once('\t').unwrap_or((app.pending_action.as_str(), ""));
+    let miner = app.miners.iter().find(|miner| miner.ip == ip);
+    let name = miner
+        .map(|miner| {
+            let trimmed = miner.name.trim();
+            if trimmed.is_empty() { miner.ip.clone() } else { trimmed.to_owned() }
+        })
+        .unwrap_or_else(|| ip.to_owned());
+    let (title, headline, detail) = confirm_copy(action, miner);
+    let mut lines = vec![
+        text(
+            headline,
+            style!(size: 36, weight: FontWeight::BOLD, color: WHITE, align: TextAlign::Center, line_height: 1.05),
+        ),
+        text(
+            name,
+            style!(size: 28, weight: FontWeight::SEMIBOLD, color: EMERALD, align: TextAlign::Center, line_height: 1.0),
+        ),
+    ];
+    if !detail.is_empty() {
+        lines.push(text(
+            detail,
+            style!(size: 40, weight: FontWeight::BOLD, color: WHITE, align: TextAlign::Center, line_height: 1.0),
+        ));
+    }
+    modal(
+        "confirm-miner",
+        true,
+        title,
+        vec![col(
+            props!(
+                width: 1184.0,
+                height: 304.0,
+                gap: 14.0,
+                justify_content: Justify::Center,
+                cross_align: CrossAlign::Center,
+            ),
+            lines,
+        )],
+        Some(ModalProps {
+            margin: 12,
+            max_width: 1256,
+            bg_color: Color::from_hex(0x1C_2E_24),
+            header_color: Color::from_hex(0x14_22_1C),
+            title_color: WHITE,
+            footer: Some(ModalFooter {
+                primary: ModalAction { label: "Confirm" },
+                secondary: Some(ModalAction { label: "Cancel" }),
+                danger: true,
+            }),
+            ..Default::default()
+        }),
+    )
+}
+
+fn imported_miners(own: Option<u8>) -> Vec<Miner> {
+    let text = inventory_body();
     let mut miners: Vec<Miner> = Vec::new();
     for line in text.lines() {
         let mut fields = line.split('\t');
@@ -5554,7 +5837,8 @@ fn family_from_type(kind: &str) -> &'static str {
         "futurebit" | "apollo" => "futurebit",
         "cgminer" => "cgminer",
         "hub" => "skip",
-        "bitaxe" | "nerdq" | "nerdminer" | "nerdqaxe" | "nerdqaxeplus" | "nmminer" | "nmaxe" | "nmmaxe" | "bitdsk" | "octaxe" | "hammer" | "thor" | "nexusl1" | "nexus" => "bitaxe",
+        "hammer" | "thor" => "hammer",
+        "bitaxe" | "nerdq" | "nerdminer" | "nerdqaxe" | "nerdqaxeplus" | "nmminer" | "nmaxe" | "nmmaxe" | "bitdsk" | "octaxe" | "nexusl1" | "nexus" => "bitaxe",
         _ => "bitaxe",
     }
 }
@@ -5611,6 +5895,7 @@ fn braiins_tunes(text: &str) -> Vec<BraiinsTune> {
 fn family_label(family: &str) -> &str {
     match family {
         "bitaxe" => "Bitaxe",
+        "hammer" => "Hammer",
         "harlo" => "Harlo",
         "braiins" => "Braiins",
         "vnish" => "VNish",
@@ -6177,8 +6462,10 @@ fn neural_globe_size(miner: &Miner, count: usize, max_hash: f64) -> f32 {
     min_d + (max_d - min_d) * scaled as f32
 }
 
-fn neural_canvas_size(width: f32, height: f32) -> (f32, f32) {
-    (width.max(40.0), screen_h(height).max(140.0))
+fn neural_canvas_size(width: f32, height: f32, chrome: bool) -> (f32, f32) {
+    let screen = screen_h(height);
+    let body = if chrome { (screen - FLEET_HEADER_H).max(140.0) } else { screen };
+    (width.max(40.0), body)
 }
 
 fn neural_node_bitmap(miner: &Miner) -> &'static Bitmap {
@@ -6203,12 +6490,8 @@ fn share_flash_alpha(remaining_ms: u32) -> u8 {
     ((elapsed * std::f32::consts::PI).sin() * 255.0) as u8
 }
 
-fn neural_exit_hit(x: f32, y: f32, width: f32) -> bool {
-    x >= width - 110.0 && y <= 130.0
-}
-
-fn neural_board(app: &App, width: f32, height: f32) -> Node {
-    let (canvas_w, canvas_h) = neural_canvas_size(width, height);
+fn neural_board(app: &App, width: f32, height: f32, chrome: bool) -> Node {
+    let (canvas_w, canvas_h) = neural_canvas_size(width, height, chrome);
     let count = app.miners.len().max(1);
     let (cx, cy, _outer, _angles, points) = neural_layout(app.miners.len(), canvas_w, canvas_h, app.neural_spin_drawn);
     let max_hash = app
@@ -6218,9 +6501,6 @@ fn neural_board(app: &App, width: f32, height: f32) -> Node {
         .fold(0.0_f64, f64::max)
         .max(1.0);
     let nucleus = (canvas_w.min(canvas_h) * 0.30).clamp(96.0, 150.0);
-    let numbers = fleet_numbers(app);
-    let (hash, zec_hash) = fleet_hash_lines(numbers.sha, numbers.zec);
-    let share_color = if app.share_flash_ms > 0 { SHARE_ORANGE } else { WHITE };
     let mut order: Vec<usize> = (0..app.miners.len()).collect();
     order.sort_by(|&left, &right| points[left].1.total_cmp(&points[right].1));
     let back = order.first().map(|index| points[*index].1).unwrap_or(cy);
@@ -6270,52 +6550,24 @@ fn neural_board(app: &App, width: f32, height: f32) -> Node {
     if !drew_nucleus {
         draws.push(Draw::bitmap(cx - nucleus * 0.5, cy - nucleus * 0.5, nucleus, nucleus, &NUCLEUS_IMG));
     }
-    draws.push(Draw::text(
-        24.0,
-        34.0,
-        hash,
-        style!(size: 40, weight: FontWeight::BOLD, color: EMERALD, align: TextAlign::Left, valign: VerticalAlign::Center),
-    ));
-    if let Some(zec) = zec_hash {
-        draws.push(Draw::text(
-            24.0,
-            64.0,
-            zec,
-            style!(size: 18, weight: FontWeight::SEMIBOLD, color: LABEL, align: TextAlign::Left, valign: VerticalAlign::Center),
-        ));
-    }
-    draws.push(Draw::text(
-        cx,
-        34.0,
-        clock_text(),
-        style!(size: 40, weight: FontWeight::BOLD, color: WHITE, align: TextAlign::Center, valign: VerticalAlign::Center),
-    ));
-    draws.push(Draw::text(
-        canvas_w - 24.0,
-        34.0,
-        numbers.shares,
-        style!(size: 40, weight: FontWeight::BOLD, color: share_color, align: TextAlign::Right, valign: VerticalAlign::Center),
-    ));
-    if app.neural_hint_ms > 0 {
-        let alpha = if app.neural_hint_ms > 450 {
-            255
-        } else {
-            (app.neural_hint_ms.saturating_mul(255) / 450) as u8
+    if !chrome {
+        let numbers = fleet_numbers(app);
+        let (hash, zec) = fleet_hash_lines(numbers.sha, numbers.zec);
+        let hash_label = match zec {
+            Some(zec) => format!("{hash}   {zec}"),
+            None => hash,
         };
-        let mark_x = canvas_w - 56.0;
-        let mark_y = 86.0;
-        draws.push(Draw::circle(mark_x, mark_y, 30.0, Color::from_rgba(0, 0, 0, alpha / 2)));
         draws.push(Draw::text(
-            mark_x,
-            mark_y,
-            "X",
-            style!(
-                size: 48,
-                weight: FontWeight::BOLD,
-                color: Color::from_rgba(255, 255, 255, alpha),
-                align: TextAlign::Center,
-                valign: VerticalAlign::Center,
-            ),
+            canvas_w * 0.38,
+            28.0,
+            clock_text(),
+            style!(size: 28, weight: FontWeight::SEMIBOLD, color: WHITE, align: TextAlign::Center),
+        ));
+        draws.push(Draw::text(
+            canvas_w * 0.62,
+            28.0,
+            hash_label,
+            style!(size: 22, weight: FontWeight::SEMIBOLD, color: EMERALD, align: TextAlign::Center),
         ));
     }
     touchable(
@@ -6415,56 +6667,31 @@ fn local_now() -> LocalDateTime {
     bmc_wasm_sdk::calendar::tz_convert(now.unix_secs, tz).unwrap_or_else(|| now.utc())
 }
 
-fn clock_glyph(ch: char) -> Option<(&'static Bitmap, f32)> {
-    match ch {
-        '0' => Some((&CLOCK_0, 76.0)),
-        '1' => Some((&CLOCK_1, 52.0)),
-        '2' => Some((&CLOCK_2, 78.0)),
-        '3' => Some((&CLOCK_3, 78.0)),
-        '4' => Some((&CLOCK_4, 84.0)),
-        '5' => Some((&CLOCK_5, 79.0)),
-        '6' => Some((&CLOCK_6, 78.0)),
-        '7' => Some((&CLOCK_7, 76.0)),
-        '8' => Some((&CLOCK_8, 76.0)),
-        '9' => Some((&CLOCK_9, 78.0)),
-        ':' => Some((&CLOCK_COLON, 24.0)),
-        'A' => Some((&CLOCK_A, 113.0)),
-        'M' => Some((&CLOCK_M, 110.0)),
-        'P' => Some((&CLOCK_P, 88.0)),
-        _ => None,
-    }
-}
-
 fn clock_face() -> Node {
-    let gap = 4.0;
-    let mut cursor = 0.0_f32;
-    let mut placed = Vec::new();
-    for ch in clock_text().chars() {
-        if ch == ' ' {
-            cursor += 28.0;
-            continue;
-        }
-        let Some((glyph, width)) = clock_glyph(ch) else {
-            continue;
-        };
-        placed.push((cursor, glyph, width));
-        cursor += width + gap;
-    }
-    if cursor > gap {
-        cursor -= gap;
-    }
-    let draws = placed
-        .into_iter()
-        .map(|(x, glyph, width)| Draw::bitmap(x, 0.0, width, CLOCK_H, glyph))
-        .collect::<Vec<_>>();
-    canvas(props!(width: cursor.max(1.0), height: CLOCK_H), draws)
+    text(
+        clock_text(),
+        style!(
+            size: 160,
+            weight: FontWeight::BOLD,
+            family: FontFamily::DeckSans,
+            color: WHITE,
+            line_height: 1.0,
+        ),
+    )
 }
 
 fn clock_text() -> String {
     let local = local_now();
-    let hour = if local.hour % 12 == 0 { 12 } else { local.hour % 12 };
-    let suffix = if local.hour < 12 { "AM" } else { "PM" };
-    format!("{hour}:{:02} {suffix}", local.minute)
+    let hour24 = bmc_wasm_sdk::system::current()
+        .time_format()
+        .is_none_or(|format| format == bmc_wasm_sdk::system::TimeFormat::Hour24);
+    if hour24 {
+        format!("{:02}:{:02}", local.hour, local.minute)
+    } else {
+        let hour = if local.hour % 12 == 0 { 12 } else { local.hour % 12 };
+        let suffix = if local.hour < 12 { "AM" } else { "PM" };
+        format!("{hour}:{:02} {suffix}", local.minute)
+    }
 }
 
 fn date_text() -> String {
@@ -6913,7 +7140,7 @@ fn saver_shell(width: f32, height: f32, draws: Vec<Draw>, body: Node) -> Node {
 fn screensaver_view(app: &App, width: f32, height: f32) -> Node {
     let height = screen_h(height);
     if app.saver_mode == SaverMode::Neural {
-        return neural_board(app, width, height);
+        return neural_board(app, width, height, false);
     }
     if app.saver_mode == SaverMode::Weather {
         let weather = &app.weather;
@@ -7258,6 +7485,7 @@ fn tailscale_actions(app: &App) -> Vec<Node> {
             tailscale_button("tailscale-restart", "Restart", 176.0),
             tailscale_button("tailscale-reset", "Reset Tailscale", 300.0),
         ],
+        "" | "offline" => vec![tailscale_button("tailscale-install", "Install Tailscale", 320.0)],
         _ => Vec::new(),
     }
 }
@@ -7434,6 +7662,24 @@ fn tailscale_view(app: &App, width: f32, height: f32) -> Node {
         lines.push(text(
             hint,
             style!(size: 20, color: LABEL, line_height: 1.15),
+        ));
+    }
+    if app.tailscale_install {
+        lines.push(text(
+            "Pairing code",
+            style!(size: 18, weight: FontWeight::SEMIBOLD, color: LABEL, line_height: 1.0),
+        ));
+        lines.push(text(
+            app.pair_code.clone(),
+            style!(size: 72, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
+        ));
+        lines.push(text(
+            "Run the HashWatcher Tailscale installer on this Deck. Adding the widget does not install Tailscale.",
+            style!(size: 18, color: LABEL, line_height: 1.1),
+        ));
+        lines.push(text(
+            "In HashWatcher, open Braiins Deck Remote and enter this code.",
+            style!(size: 18, color: LABEL, line_height: 1.1),
         ));
     }
     let actions = tailscale_actions(app);
@@ -7780,7 +8026,14 @@ fn settings_menu(app: &App, width: f32, height: f32) -> Node {
                         settings_bar("settings-refresh", "Refresh | Poll", "", EMERALD, col_w, bar_h),
                     ],
                 ),
-                settings_bar("settings-support", "Support | Download", "", LABEL, view_w, bar_h),
+                settings_bar(
+                    "settings-support",
+                    "Support | Download",
+                    if app.phone_paired { "Phone paired" } else { "" },
+                    EMERALD,
+                    view_w,
+                    bar_h,
+                ),
             ],
         ),
     )
@@ -7788,10 +8041,7 @@ fn settings_menu(app: &App, width: f32, height: f32) -> Node {
 
 fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
     let (view_w, _) = settings_box(width, height);
-    let pct = shown_brightness(app);
-    let pct_label = if pct < 10 { "—".to_owned() } else { format!("{pct}%") };
     let city = if app.place.is_empty() { "Set city".to_owned() } else { app.place.clone() };
-    let slider_w = (view_w - 280.0).max(160.0);
     settings_frame(
         "Display | Weather",
         "settings-menu",
@@ -7800,39 +8050,9 @@ fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
         col(
             props!(width: view_w, gap: 10.0),
             [
-                row(
-                    props!(width: view_w, height: 36.0, gap: 16.0, cross_align: CrossAlign::Center),
-                    [
-                        text(
-                            "Brightness",
-                            style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
-                        ),
-                        text(
-                            pct_label,
-                            style!(size: 22, weight: FontWeight::BOLD, color: EMERALD, line_height: 1.0),
-                        ),
-                        col(
-                            props!(width: slider_w, height: 36.0, justify_content: Justify::Center),
-                            [progress_bar!(
-                                ProgressMode::Slider(brightness_frac(pct)),
-                                touch_key: "brightness",
-                                track_h: 10.0,
-                                fill_color: EMERALD,
-                                track_color: Color::from_rgb(48, 56, 52),
-                                bg_color: Color::from_rgb(22, 24, 28),
-                            )],
-                        ),
-                    ],
-                ),
                 text(
-                    screen_off_caption(app),
-                    style!(
-                        size: 16,
-                        color: LABEL,
-                        line_height: 1.0,
-                        text_overflow: TextOverflow::Ellipsis,
-                        max_width: view_w.max(40.0) as u32,
-                    ),
+                    "Brightness is set from the HashWatcher app, or the Deck tray.",
+                    style!(size: 18, color: LABEL, line_height: 1.1),
                 ),
                 text(
                     "Screen saver",
@@ -7892,7 +8112,7 @@ fn settings_display_page(app: &App, width: f32, height: f32) -> Node {
                     ],
                 ),
                 text(
-                    "Used only for weather data.",
+                    "Used for weather and the hourly version check.",
                     style!(size: 16, color: LABEL, line_height: 1.1),
                 ),
             ],
@@ -8052,7 +8272,7 @@ fn settings_refresh_page(app: &App, width: f32, height: f32) -> Node {
     )
 }
 
-fn settings_support_page(width: f32, height: f32) -> Node {
+fn settings_support_page(app: &App, width: f32, height: f32) -> Node {
     let (view_w, view_h) = settings_box(width, height);
     settings_frame(
         "Support | Download",
@@ -8073,7 +8293,7 @@ fn settings_support_page(width: f32, height: f32) -> Node {
                         row(
                             props!(gap: 16.0, cross_align: CrossAlign::Center),
                             [
-                                qr_tile(112.0, &DOWNLOAD_QR),
+                                qr_tile(112.0, DOWNLOAD_URL),
                                 col(
                                     props!(gap: 4.0),
                                     [
@@ -8092,7 +8312,7 @@ fn settings_support_page(width: f32, height: f32) -> Node {
                         row(
                             props!(gap: 16.0, cross_align: CrossAlign::Center),
                             [
-                                qr_tile(112.0, &SUPPORT_QR),
+                                qr_tile(112.0, &support_mail()),
                                 col(
                                     props!(gap: 4.0),
                                     [
@@ -8109,6 +8329,27 @@ fn settings_support_page(width: f32, height: f32) -> Node {
                             ],
                         ),
                     ],
+                ),
+                text(
+                    "Pairing code",
+                    style!(size: 20, weight: FontWeight::SEMIBOLD, color: LABEL, line_height: 1.0),
+                ),
+                text(
+                    app.pair_code.clone(),
+                    style!(size: 96, weight: FontWeight::BOLD, color: WHITE, line_height: 0.9),
+                ),
+                text(
+                    if app.phone_paired {
+                        "Paired with a HashWatcher phone."
+                    } else {
+                        "In HashWatcher, open Braiins Deck Remote and enter this code."
+                    },
+                    style!(
+                        size: 18,
+                        weight: FontWeight::SEMIBOLD,
+                        color: if app.phone_paired { EMERALD } else { LABEL },
+                        line_height: 1.1,
+                    ),
                 ),
             ],
         ),
@@ -8132,7 +8373,7 @@ fn settings_view(app: &App, width: f32, height: f32) -> Node {
         3 => settings_layout_page(app, width, height),
         4 => settings_alerts_page(app, width, height),
         5 => settings_refresh_page(app, width, height),
-        6 => settings_support_page(width, height),
+        6 => settings_support_page(app, width, height),
         _ => settings_menu(app, width, height),
     }
 }
@@ -8273,19 +8514,11 @@ fn header_figure(value: &str, color: Color, size: u32) -> Node {
     )
 }
 
-fn neural_clock_group(app: &App, hash: &str, zec: Option<&str>, shares: &str) -> Vec<Node> {
-    let clock = header_figure(&clock_text(), WHITE, 36);
-    if !app.neural {
-        return vec![clock];
+fn neural_clock_group(app: &App) -> Vec<Node> {
+    if app.neural {
+        return Vec::new();
     }
-    let share_color = if app.share_flash_ms > 0 { SHARE_ORANGE } else { WHITE };
-    let mut items = vec![header_figure(hash, EMERALD, 22)];
-    if let Some(zec) = zec {
-        items.push(header_figure(zec, LABEL, 18));
-    }
-    items.push(header_figure(shares, share_color, 22));
-    items.push(clock);
-    items
+    vec![header_figure(&clock_text(), WHITE, 36)]
 }
 
 fn best_popup(popup: &BestPopup, width: f32, height: f32) -> Node {
@@ -8742,20 +8975,27 @@ fn summary_metric(miner: &Miner, col: u8) -> (String, Color) {
         7 => (count_text(miner.shares_accepted), WHITE),
         8 => (reject_text(miner), rate_color(miner)),
         9 => (format_difficulty(miner.best_diff), AMBER),
-        10 => (format_difficulty(miner.best_session), AMBER),
+        10 => {
+            if miner.best_session.is_some_and(|value| value > 0.0) {
+                (format_difficulty(miner.best_session), AMBER)
+            } else {
+                (String::new(), AMBER)
+            }
+        }
         11 => match miner.frequency.filter(|value| *value > 0.0) {
             Some(mhz) => (format!("{mhz:.0}"), WHITE),
             None => ("—".to_owned(), MUTED),
         },
         12 => (format_uptime(miner.uptime_s), WHITE),
-        13 => (
-            format!(
-                "{} / {}",
-                format_difficulty(miner.best_diff),
-                format_difficulty(miner.best_session)
-            ),
-            AMBER,
-        ),
+        13 => {
+            let best = format_difficulty(miner.best_diff);
+            let text = if miner.best_session.is_some_and(|value| value > 0.0) {
+                format!("{best} / {}", format_difficulty(miner.best_session))
+            } else {
+                best
+            };
+            (text, AMBER)
+        }
         15 => (status_label(miner).to_owned(), if miner.reachable { EMERALD } else { RED }),
         _ => ("—".to_owned(), MUTED),
     }
@@ -9151,9 +9391,6 @@ fn pool_routes(app: &App, width: f32) -> Vec<Node> {
 
 fn fleet_view(app: &App, width: f32, height: f32) -> Node {
     let height = screen_h(height);
-    if app.neural && !app.summary && !app.miners.is_empty() {
-        return with_theme(width, height, neural_board(app, width, height));
-    }
     let numbers = fleet_numbers(app);
     let share_color = if app.share_flash_ms > 0 { Color::from_rgb(255, 210, 60) } else { SHARE_ORANGE };
     let (hash, zec_hash) = fleet_hash_lines(numbers.sha, numbers.zec);
@@ -9161,11 +9398,11 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
     let header_controls = row(
         props!(height: FLEET_HEADER_H, gap: 0.0, cross_align: CrossAlign::Center),
         [
-            view_segment("view-fleet", "Fleet", fleet_on),
+            view_segment("view-neural", "Neural Net", app.neural, 176.0),
             view_edge(),
-            view_segment("view-neural", "Neural", app.neural),
+            view_segment("view-fleet", "Fleet", fleet_on, 120.0),
             view_edge(),
-            view_segment("view-summary", "Summary", app.summary),
+            view_segment("view-summary", "Summary", app.summary, 150.0),
             view_edge(),
             col(
                 props!(
@@ -9210,22 +9447,29 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
     );
     let summary_open = app.summary && !app.miners.is_empty();
     let neural_open = app.neural && !app.summary && !app.miners.is_empty();
+    let show_bar = !neural_open || app.neural_hint_ms > 0;
     let lower = if summary_open {
         summary_view(app, width, height)
     } else if neural_open {
-        neural_board(app, width, height)
+        neural_board(app, width, height, show_bar)
     } else {
         fleet_list(app, width, height)
     };
-    let list = col(
-        props!(
-            width: width,
-            padding: FLEET_PAD,
-            gap: FLEET_GAP,
-        ),
-        [lower],
-    );
-    let mut stack = vec![col(
+    let list = if neural_open {
+        lower
+    } else {
+        col(
+            props!(
+                width: width,
+                padding: FLEET_PAD,
+                gap: FLEET_GAP,
+            ),
+            [lower],
+        )
+    };
+    let mut stack = Vec::new();
+    if show_bar {
+        stack.push(col(
         props!(height: FLEET_HEADER_H, width: width, background: BAR_FILL),
         [
             row(
@@ -9238,7 +9482,7 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
                     cross_align: CrossAlign::Center,
                     gap: 18.0,
                 ),
-                neural_clock_group(app, &hash, zec_hash.as_deref(), &numbers.shares),
+                neural_clock_group(app),
             ),
             row(
                 props!(
@@ -9260,7 +9504,8 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
                 ],
             ),
         ],
-    )];
+    ));
+    }
     if !neural_open && !summary_open {
         stack.push(metrics);
     }
@@ -9468,7 +9713,7 @@ fn fleet_list(app: &App, width: f32, height: f32) -> Node {
         return row(
             props!(height: list_h, gap: 28.0, cross_align: CrossAlign::Center),
             [
-                qr_tile(200.0, &DOWNLOAD_QR),
+                qr_tile(200.0, DOWNLOAD_URL),
                 col(
                     props!(gap: 6.0, width: (width - 260.0).max(360.0)),
                     [
@@ -9487,6 +9732,18 @@ fn fleet_list(app: &App, width: f32, height: f32) -> Node {
                         text(
                             "Add Miner, then Scan All. Scan the code to install the app.",
                             style!(size: 18, color: LABEL, line_height: 1.2),
+                        ),
+                        text(
+                            "Pairing code",
+                            style!(size: 18, weight: FontWeight::SEMIBOLD, color: LABEL, line_height: 1.0),
+                        ),
+                        text(
+                            app.pair_code.clone(),
+                            style!(size: 64, weight: FontWeight::BOLD, color: WHITE, line_height: 0.9),
+                        ),
+                        text(
+                            "In HashWatcher, open Braiins Deck Remote and enter this code.",
+                            style!(size: 18, color: LABEL, line_height: 1.1),
                         ),
                     ],
                 ),
@@ -9693,7 +9950,9 @@ fn stat_rows(miner: &Miner, efficiency: Option<f64>, inner_w: f32, grid_h: f32) 
     let mut items: Vec<(&str, String, Color)> = Vec::new();
     if miner.family != "bitmainZEC" {
         items.push(("Best", format_difficulty(miner.best_diff), AMBER));
-        items.push(("Session", format_difficulty(miner.best_session), AMBER));
+        if miner.best_session.is_some_and(|value| value > 0.0) {
+            items.push(("Session", format_difficulty(miner.best_session), AMBER));
+        }
     }
     items.push(("Shares", count_text(miner.shares_accepted), WHITE));
     if miner.power_w.is_some() {
@@ -10430,7 +10689,7 @@ fn control_art(id: &str, image: &Bitmap) -> Node {
     touchable(
         id,
         props!(width: 88.0, height: 68.0),
-        [Draw::bitmap(0.0, 0.0, 88.0, 68.0, image)],
+        [Draw::bitmap(10.0, 0.0, 68.0, 68.0, image)],
     )
 }
 
@@ -10535,7 +10794,7 @@ fn stat_tile(label: &str, value: &str, color: Color, width: f32, height: f32) ->
     )
 }
 
-fn qr_tile(size: f32, image: &Bitmap) -> Node {
+fn qr_tile(size: f32, payload: &str) -> Node {
     let inner = (size - 16.0).max(40.0);
     col(
         props!(
@@ -10547,8 +10806,24 @@ fn qr_tile(size: f32, image: &Bitmap) -> Node {
         ),
         [canvas(
             props!(width: inner, height: inner),
-            [Draw::bitmap(0.0, 0.0, inner, inner, image)],
+            [Draw::qr(
+                0.0,
+                0.0,
+                inner,
+                payload,
+                QrStyle {
+                    dark: BLACK,
+                    light: WHITE,
+                    quiet_zone: 2,
+                },
+            )],
         )],
+    )
+}
+
+fn support_mail() -> String {
+    format!(
+        "mailto:info@engineeredessentials.com?subject=Braiins%20Deck%20Support&body=%0A%0A%0A%0A%0AVersion%20{DECK_VERSION}"
     )
 }
 
@@ -10622,10 +10897,10 @@ fn view_edge() -> Node {
     )
 }
 
-fn view_segment(id: &str, label: &str, selected: bool) -> Node {
+fn view_segment(id: &str, label: &str, selected: bool, width: f32) -> Node {
     col(
         props!(
-            width: 132.0,
+            width: width,
             height: FLEET_HEADER_H,
             background: if selected { EMERALD } else { TRANSPARENT },
             justify_content: Justify::Center,
@@ -11036,36 +11311,7 @@ fn uint32_value(value: u32) -> Vec<u8> {
     msg
 }
 
-fn handle_brightness(drags: &HashMap<String, TouchHit>) {
-    let mut changed = false;
-    APP.with(|slot| {
-        let mut app = slot.borrow_mut();
-        let Some(hit) = drags.get("brightness") else {
-            if app.brightness_drag {
-                app.brightness_drag = false;
-                app.push_brightness();
-                app.touch_controls();
-            }
-            return;
-        };
-        app.brightness_drag = true;
-        let pct = snap_brightness(hit.frac_x());
-        let night = deck_night();
-        let current = if night { app.night_brightness } else { app.brightness };
-        if pct != current {
-            if night {
-                app.night_brightness = pct;
-            } else {
-                app.brightness = pct;
-            }
-            changed = true;
-            app.push_brightness();
-        }
-    });
-    if changed {
-        request_frame();
-    }
-}
+fn handle_brightness(_drags: &HashMap<String, TouchHit>) {}
 
 fn handle_clicks(clicks: &HashMap<String, TouchHit>) {
     let swallow = APP.with(|slot| {
@@ -11109,14 +11355,8 @@ fn handle_fleet_gesture(clicks: &HashMap<String, TouchHit>, drags: &HashMap<Stri
             return;
         }
         if let Some(hit) = clicks.get("neural-hit") {
-            let (canvas_w, _) = neural_canvas_size(width, height);
-            if neural_exit_hit(hit.x, hit.y, canvas_w) {
-                app.neural = false;
-                app.summary = false;
-                app.neural_hint_ms = 0;
-                app.idle_ms = 0;
-                changed = true;
-            } else if neural_center_hit(hit.x, hit.y, width, height) {
+            let chrome = app.neural_hint_ms > 0 && !app.saver_on;
+            if neural_center_hit(hit.x, hit.y, width, height, chrome) {
                 app.label_mode = match app.label_mode {
                     0 => 1,
                     1 => 2,
@@ -11124,12 +11364,12 @@ fn handle_fleet_gesture(clicks: &HashMap<String, TouchHit>, drags: &HashMap<Stri
                 };
                 app.store_saver();
                 changed = true;
-            } else if let Some(ip) = neural_ip_at(&app, hit.x, hit.y, width, height, app.neural_spin_drawn) {
+            } else if let Some(ip) = neural_ip_at(&app, hit.x, hit.y, width, height, app.neural_spin_drawn, chrome) {
                 app.selected = Some(ip);
                 app.notice.clear();
                 changed = true;
             } else {
-                app.neural_hint_ms = 5_450;
+                app.neural_hint_ms = NEURAL_BAR_MS;
                 changed = true;
             }
         }
@@ -11178,16 +11418,16 @@ fn handle_fleet_gesture(clicks: &HashMap<String, TouchHit>, drags: &HashMap<Stri
     }
 }
 
-fn neural_center_hit(x: f32, y: f32, width: f32, height: f32) -> bool {
-    let (canvas_w, canvas_h) = neural_canvas_size(width, height);
+fn neural_center_hit(x: f32, y: f32, width: f32, height: f32, chrome: bool) -> bool {
+    let (canvas_w, canvas_h) = neural_canvas_size(width, height, chrome);
     let cx = canvas_w * 0.5;
     let cy = canvas_h * 0.50;
     let nucleus = (canvas_w.min(canvas_h) * 0.30).clamp(96.0, 150.0);
     (x - cx).hypot(y - cy) <= nucleus * 0.42
 }
 
-fn neural_ip_at(app: &App, x: f32, y: f32, width: f32, height: f32, spin: f32) -> Option<String> {
-    let (plot_w, plot_h) = neural_canvas_size(width, height);
+fn neural_ip_at(app: &App, x: f32, y: f32, width: f32, height: f32, spin: f32, chrome: bool) -> Option<String> {
+    let (plot_w, plot_h) = neural_canvas_size(width, height, chrome);
     let points = neural_points(app.miners.len(), plot_w, plot_h, spin);
     let mut best: Option<(usize, f32)> = None;
     for (index, (px, py)) in points.iter().copied().enumerate() {
@@ -11308,7 +11548,6 @@ pub extern "C" fn render(delta_ms: u32) {
             }
             app.promote_best();
             app.pump_charts();
-            app.poll_deck(delta_ms);
             app.maybe_fetch_weather();
             app.fill();
         } else if app.tailscale_open
@@ -11353,24 +11592,30 @@ pub extern "C" fn render(delta_ms: u32) {
     let height = size.height as f32;
     let root = APP.with(|slot| {
         let app = slot.borrow();
-        if let Some(popup) = app.celebration.as_ref() {
-            return best_popup(popup, width, height);
-        }
-        if app.saver_on && !app.settings {
-            return screensaver_view(&app, width, height);
-        }
-        if app.settings {
-            return settings_view(&app, width, height);
-        }
-        if let Some(ip) = app.selected.clone() {
+        let node = if let Some(popup) = app.celebration.as_ref() {
+            best_popup(popup, width, height)
+        } else if app.saver_on && !app.settings {
+            screensaver_view(&app, width, height)
+        } else if app.settings {
+            settings_view(&app, width, height)
+        } else if let Some(ip) = app.selected.clone() {
             if let Some(miner) = app.miners.iter().find(|miner| miner.ip == ip).cloned() {
                 if app.chart_open {
-                    return chart_screen(&miner, &app, width, height);
+                    chart_screen(&miner, &app, width, height)
+                } else {
+                    dashboard(&miner, &app, width, height)
                 }
-                return dashboard(&miner, &app, width, height);
+            } else {
+                fleet_view(&app, width, height)
             }
+        } else {
+            fleet_view(&app, width, height)
+        };
+        if app.pending_action.is_empty() {
+            node
+        } else {
+            col(props!(width: width, height: height), [node, confirm_layer(&app)])
         }
-        fleet_view(&app, width, height)
     });
     let drawn = render_ui(size.width, size.height, root);
     let settings_open = APP.with(|app| app.borrow().settings);
@@ -11379,7 +11624,7 @@ pub extern "C" fn render(delta_ms: u32) {
     }
     handle_brightness(&drawn.drags);
     handle_clicks(&drawn.clicks);
-    let (animate_neural, flash_left, notice_left, celebrating, settings) = APP.with(|app| {
+    let (animate_neural, flash_left, notice_left, celebrating, settings, rainbow) = APP.with(|app| {
         let app = app.borrow();
         (
             !app.settings
@@ -11391,12 +11636,10 @@ pub extern "C" fn render(delta_ms: u32) {
             app.notice_ms,
             app.celebration.is_some(),
             app.settings && app.celebration.is_none(),
+            app.led_rainbow && app.led_hold && app.celebration.is_none(),
         )
     });
-    if settings {
-        // LED effects re-arm on this clock. Miner animation frames stay off.
-        request_frame_after(1_000);
-    } else if animate_neural {
+    if animate_neural {
         APP.with(|slot| {
             let mut app = slot.borrow_mut();
             app.neural_hint_ms = app.neural_hint_ms.saturating_sub(delta_ms);
@@ -11411,6 +11654,11 @@ pub extern "C" fn render(delta_ms: u32) {
         request_frame_after(80);
     } else if flash_left > 0 {
         request_frame_after(16);
+    } else if rainbow {
+        request_frame_after(RAINBOW_STEP_MS);
+    } else if settings {
+        // LED effects re-arm on this clock. Miner animation frames stay off.
+        request_frame_after(1_000);
     } else if notice_left > 0 {
         request_frame_after(notice_left.min(1_000));
     } else {
@@ -11422,16 +11670,28 @@ pub extern "C" fn render(delta_ms: u32) {
 pub extern "C" fn on_params_update() {
     APP.with(|app| {
         let mut app = app.borrow_mut();
+        let current = bmc_wasm_sdk::params::current();
+        let previous = bmc_wasm_sdk::params::previous();
+        if !previous.is_empty() {
+            if let (Some(now), Some(before)) = (current.get_bool("outbound"), previous.get_bool("outbound")) {
+                if now != before {
+                    app.set_outbound(now);
+                }
+            }
+            let before = previous.get_str("deck").unwrap_or("").trim();
+            let deck = current.get_str("deck").unwrap_or("").trim();
+            if !deck.is_empty() && deck != before {
+                bmc_wasm_sdk::kv::set("controls", deck.as_bytes());
+                app.controls_remote.clear();
+                app.apply_deck_controls();
+            }
+        }
+        // The shipping iOS app still writes the roster through Deck widget params.
         let stamp = inventory_param_stamp();
-        if app.inventory_seen && stamp == app.inventory_stamp {
-            app.apply_deck_controls();
-        } else {
+        if !stamp.trim().is_empty() && stamp != app.inventory_stamp {
+            bmc_wasm_sdk::kv::set("inventory", redact_inventory(&stamp).as_bytes());
             app.apply_inventory();
         }
     });
-    let paused = APP.with(|app| app.borrow().settings);
-    if !paused {
-        APP.with(|app| app.borrow_mut().fill());
-    }
     request_frame();
 }
