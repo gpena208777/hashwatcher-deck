@@ -8,6 +8,9 @@ use bmc_wasm_sdk::led::{self, LedEffect};
 use bmc_wasm_sdk::socket::{self, Socket, SocketEvent};
 use bmc_wasm_sdk::*;
 
+#[path = "power.rs"]
+mod power;
+
 use crate::format::{
     format_efficiency, format_hashrate, format_power, format_temp, format_uptime,
 };
@@ -77,11 +80,15 @@ const SHARE_ORANGE: Color = Color::from_hex(0xFF_9F_0A);
 const EMERALD_BG: Bitmap = include_bitmap!("assets/emeraldtheme.jpg");
 const SHARE_SOUND: bmc_wasm_sdk::Audio = include_audio!("assets/coin.mp3");
 const GEAR_ICON: Bitmap = include_bitmap!("assets/gear.png");
-/// Deck settings release. Bump this on each update. The support QR emails the same value.
-const DECK_VERSION: &str = "1.0.4";
-const DOWNLOAD_URL: &str = "https://www.hashwatcher.app";
+/// Deck settings release. Bump this on each update.
+const DECK_VERSION: &str = "1.0.5";
 /// First look is a minute after start, then once an hour. Outbound Data must be on.
 const UPDATE_FIRST_MS: u32 = 60_000;
+/// Weather at Starbase, Texas, after one quiet minute. Applied once per Deck.
+const SAVER_DEFAULT_MS: u32 = 60_000;
+const SAVER_HOME: &str = "Starbase, Texas";
+const SAVER_HOME_LAT: f64 = 25.9898;
+const SAVER_HOME_LON: f64 = -97.1850;
 const UPDATE_EVERY_MS: u32 = 3_600_000;
 const RELEASE_URL: &str = "https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck/release.json";
 
@@ -246,6 +253,9 @@ struct App {
     gesture_moved: bool,
     neural: bool,
     summary: bool,
+    /// Top-bar Power Monitor page. Shown only when HashWatcher sent a monitor.
+    power_view: bool,
+    power: power::PowerFeed,
     summary_cols: [u8; 4],
     summary_edit: u8,
     since_poll: u32,
@@ -551,6 +561,8 @@ impl App {
             gesture_moved: false,
             neural: false,
             summary: false,
+            power_view: false,
+            power: power::PowerFeed::new(),
             summary_cols: [0, 1, 2, 3],
             summary_edit: 0,
             since_poll: POLL_MS,
@@ -572,10 +584,10 @@ impl App {
             hash_order: Vec::new(),
             hash_order_ms: 0,
             hash_order_seeded: false,
-            saver_ms: 0,
-            saver_mode: SaverMode::Clock,
+            saver_ms: SAVER_DEFAULT_MS,
+            saver_mode: SaverMode::Weather,
             outbound: true,
-            weather_f: false,
+            weather_f: true,
             saver_on: false,
             idle_ms: 0,
             swallow_touch: false,
@@ -601,14 +613,18 @@ impl App {
             brightness_drag: false,
             zec_fan: None,
             zec_fetch: None,
-            place: String::new(),
+            place: SAVER_HOME.to_owned(),
             place_edit: false,
-            place_shift: true,
+            place_shift: false,
             places: Vec::new(),
             suggest_fetch: None,
-            weather: Weather::default(),
+            weather: Weather {
+                lat: SAVER_HOME_LAT,
+                lon: SAVER_HOME_LON,
+                ..Weather::default()
+            },
             weather_fetch: None,
-            weather_geo: true,
+            weather_geo: false,
             alarm_open: false,
             alarm_naming: false,
             alarm_hour: 7,
@@ -699,7 +715,7 @@ impl App {
         self.weather_f = match bmc_wasm_sdk::kv::get_string("weather_unit").as_deref() {
             Some("f") => true,
             Some("c") => false,
-            _ => device_fahrenheit(),
+            _ => true,
         };
         if let Some(text) = bmc_wasm_sdk::kv::get_string("share_sound") {
             self.share_sound = text != "0";
@@ -744,6 +760,29 @@ impl App {
             if let Some(on) = bmc_wasm_sdk::params::current().get_bool("outbound") {
                 self.outbound = on;
             }
+        }
+        let mut seed = false;
+        if bmc_wasm_sdk::kv::get_string("saver_home").is_none() {
+            self.saver_ms = SAVER_DEFAULT_MS;
+            self.saver_mode = SaverMode::Weather;
+            self.place = SAVER_HOME.to_owned();
+            self.place_shift = false;
+            self.weather.lat = SAVER_HOME_LAT;
+            self.weather.lon = SAVER_HOME_LON;
+            self.weather_geo = false;
+            self.weather.ready = false;
+            self.weather.fetched_at = 0;
+            self.weather.error.clear();
+            bmc_wasm_sdk::kv::set("saver_home", b"1");
+            seed = true;
+        }
+        if bmc_wasm_sdk::kv::get_string("unit_home").is_none() {
+            self.weather_f = true;
+            bmc_wasm_sdk::kv::set("unit_home", b"1");
+            seed = true;
+        }
+        if seed {
+            self.store_saver();
         }
     }
 
@@ -855,11 +894,23 @@ impl App {
             self.prefix = prefix;
             self.own = Some(own);
         }
+        self.power.reload();
+        if !self.power.ready() {
+            self.power_view = false;
+        }
         let imported = imported_miners(self.own);
         if imported.is_empty() {
             self.forget_charts(&[]);
             self.miners.clear();
             self.selected = None;
+            if self.power.ready() {
+                self.phase = Phase::Live;
+                self.power_view = true;
+                self.neural = false;
+                self.summary = false;
+                self.message.clear();
+                return;
+            }
             self.phase = Phase::NeedNetwork;
             self.message = "Send miners from HashWatcher".to_owned();
             return;
@@ -1580,6 +1631,7 @@ impl App {
             fields.push(format!("lat={:.4}", self.weather.lat));
             fields.push(format!("lon={:.4}", self.weather.lon));
         }
+        fields.extend(self.power.control_fields());
         fields.join(";")
     }
 
@@ -1723,6 +1775,10 @@ impl App {
         }
         if self.tailscale_cmd == Some(response.request_id.to_wire()) {
             self.tailscale_cmd = None;
+            return;
+        }
+        if self.power.owns_fetch(response.request_id.to_wire()) {
+            self.power.on_fetch(response);
             return;
         }
         if self.suggest_fetch == Some(response.request_id.to_wire()) {
@@ -1990,6 +2046,10 @@ impl App {
 
     fn handle_socket(&mut self, socket: Socket, event: &SocketEvent<'_>) {
         let id = socket.0.to_wire();
+        if self.power.owns(id) {
+            self.power.on_socket(socket, event);
+            return;
+        }
         if self.sound_socket.is_some_and(|sound| sound.0.to_wire() == id) {
             match event {
                 SocketEvent::Connected => {
@@ -2274,6 +2334,12 @@ impl App {
         if !self.pending_action.is_empty() {
             return true;
         }
+        if self.power.select(id) {
+            if self.power.take_persist() {
+                self.touch_controls();
+            }
+            return true;
+        }
         if self.celebration.is_some() {
             if id == "best-awesome" {
                 self.celebration = None;
@@ -2297,13 +2363,15 @@ impl App {
         if id == "view-fleet" {
             self.neural = false;
             self.summary = false;
+            self.power_view = false;
             self.neural_hint_ms = 0;
             return true;
         }
         if id == "view-neural" {
-            let entering = !self.neural || self.summary;
+            let entering = !self.neural || self.summary || self.power_view;
             self.neural = true;
             self.summary = false;
+            self.power_view = false;
             self.settings = false;
             if entering {
                 self.neural_hint_ms = NEURAL_BAR_MS;
@@ -2313,6 +2381,15 @@ impl App {
         if id == "view-summary" {
             self.summary = true;
             self.neural = false;
+            self.power_view = false;
+            self.settings = false;
+            self.neural_hint_ms = 0;
+            return true;
+        }
+        if id == "view-power" {
+            self.power_view = self.power.ready();
+            self.neural = false;
+            self.summary = false;
             self.settings = false;
             self.neural_hint_ms = 0;
             return true;
@@ -6654,12 +6731,6 @@ fn url_query(value: &str) -> String {
     out
 }
 
-fn device_fahrenheit() -> bool {
-    let snap = bmc_wasm_sdk::system::current();
-    matches!(snap.temperature_unit(), Some(bmc_wasm_sdk::system::TemperatureUnit::Fahrenheit))
-        || matches!(snap.unit_system(), Some(bmc_wasm_sdk::system::UnitSystem::Imperial))
-}
-
 fn local_now() -> LocalDateTime {
     let now = SystemTime::now();
     let snap = bmc_wasm_sdk::system::current();
@@ -8290,41 +8361,33 @@ fn settings_support_page(app: &App, width: f32, height: f32) -> Node {
                 row(
                     props!(gap: 48.0, cross_align: CrossAlign::Center),
                     [
-                        row(
-                            props!(gap: 16.0, cross_align: CrossAlign::Center),
+                        col(
+                            props!(gap: 4.0),
                             [
-                                qr_tile(112.0, DOWNLOAD_URL),
-                                col(
-                                    props!(gap: 4.0),
-                                    [
-                                        text(
-                                            "Download HashWatcher",
-                                            style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
-                                        ),
-                                        text(
-                                            "www.hashwatcher.app",
-                                            style!(size: 18, weight: FontWeight::SEMIBOLD, color: EMERALD, line_height: 1.0),
-                                        ),
-                                    ],
+                                text(
+                                    "Download HashWatcher",
+                                    style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
+                                ),
+                                text(
+                                    "www.hashwatcher.app",
+                                    style!(size: 18, weight: FontWeight::SEMIBOLD, color: EMERALD, line_height: 1.0),
                                 ),
                             ],
                         ),
-                        row(
-                            props!(gap: 16.0, cross_align: CrossAlign::Center),
+                        col(
+                            props!(gap: 4.0),
                             [
-                                qr_tile(112.0, &support_mail()),
-                                col(
-                                    props!(gap: 4.0),
-                                    [
-                                        text(
-                                            "Braiins Deck Support",
-                                            style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
-                                        ),
-                                        text(
-                                            format!("Version {DECK_VERSION}"),
-                                            style!(size: 18, weight: FontWeight::SEMIBOLD, color: EMERALD, line_height: 1.0),
-                                        ),
-                                    ],
+                                text(
+                                    "Braiins Deck Support",
+                                    style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
+                                ),
+                                text(
+                                    "info@engineeredessentials.com",
+                                    style!(size: 18, weight: FontWeight::SEMIBOLD, color: EMERALD, line_height: 1.0),
+                                ),
+                                text(
+                                    format!("Version {DECK_VERSION}"),
+                                    style!(size: 18, weight: FontWeight::SEMIBOLD, color: EMERALD, line_height: 1.0),
                                 ),
                             ],
                         ),
@@ -8512,13 +8575,6 @@ fn header_figure(value: &str, color: Color, size: u32) -> Node {
             valign: VerticalAlign::Center,
         ),
     )
-}
-
-fn neural_clock_group(app: &App) -> Vec<Node> {
-    if app.neural {
-        return Vec::new();
-    }
-    vec![header_figure(&clock_text(), WHITE, 36)]
 }
 
 fn best_popup(popup: &BestPopup, width: f32, height: f32) -> Node {
@@ -9389,32 +9445,62 @@ fn pool_routes(app: &App, width: f32) -> Vec<Node> {
     nodes
 }
 
+fn header_controls(app: &App) -> Node {
+    let fleet_on = !app.neural && !app.summary && !app.power_view;
+    let mut items = vec![
+        view_segment("view-neural", "Neural Net", app.neural && !app.power_view, 176.0),
+        view_edge(),
+        view_segment("view-fleet", "Fleet", fleet_on, 120.0),
+        view_edge(),
+        view_segment("view-summary", "Summary", app.summary && !app.power_view, 150.0),
+    ];
+    if app.power.ready() {
+        items.push(view_edge());
+        items.push(view_segment("view-power", "Power Monitor", app.power_view, 220.0));
+    }
+    items.push(view_edge());
+    items.push(col(
+        props!(
+            width: 64.0,
+            height: FLEET_HEADER_H,
+            justify_content: Justify::Center,
+            cross_align: CrossAlign::Center,
+        ),
+        [gear_button()],
+    ));
+    row(
+        props!(height: FLEET_HEADER_H, gap: 0.0, cross_align: CrossAlign::Center),
+        items,
+    )
+}
+
+fn header_clock(app: &App) -> Vec<Node> {
+    if app.neural {
+        return Vec::new();
+    }
+    if !app.power.ready() {
+        return vec![header_figure(&clock_text(), WHITE, 36)];
+    }
+    vec![
+        canvas(props!(width: 300.0, height: 1.0), Vec::<Draw>::new()),
+        header_figure(&clock_text(), WHITE, 32),
+    ]
+}
+
+fn power_monitor_view(app: &App, width: f32, height: f32) -> Node {
+    let body_h = (screen_h(height) - FLEET_HEADER_H - FLEET_PAD * 2.0).max(160.0);
+    let outer = (width - FLEET_PAD * 2.0).max(320.0);
+    app.power.view(outer, body_h)
+}
+
 fn fleet_view(app: &App, width: f32, height: f32) -> Node {
     let height = screen_h(height);
+    if app.power_view && app.power.is_chart_full() {
+        return with_theme(width, height, app.power.full_chart(width, height, &[]));
+    }
     let numbers = fleet_numbers(app);
     let share_color = if app.share_flash_ms > 0 { Color::from_rgb(255, 210, 60) } else { SHARE_ORANGE };
     let (hash, zec_hash) = fleet_hash_lines(numbers.sha, numbers.zec);
-    let fleet_on = !app.neural && !app.summary;
-    let header_controls = row(
-        props!(height: FLEET_HEADER_H, gap: 0.0, cross_align: CrossAlign::Center),
-        [
-            view_segment("view-neural", "Neural Net", app.neural, 176.0),
-            view_edge(),
-            view_segment("view-fleet", "Fleet", fleet_on, 120.0),
-            view_edge(),
-            view_segment("view-summary", "Summary", app.summary, 150.0),
-            view_edge(),
-            col(
-                props!(
-                    width: 64.0,
-                    height: FLEET_HEADER_H,
-                    justify_content: Justify::Center,
-                    cross_align: CrossAlign::Center,
-                ),
-                [gear_button()],
-            ),
-        ],
-    );
     let bar_w = (width - 20.0).max(80.0);
     let metrics = row(
         props!(
@@ -9445,10 +9531,13 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
             )],
         )],
     );
-    let summary_open = app.summary && !app.miners.is_empty();
-    let neural_open = app.neural && !app.summary && !app.miners.is_empty();
+    let power_open = app.power_view && app.power.ready();
+    let summary_open = app.summary && !app.miners.is_empty() && !power_open;
+    let neural_open = app.neural && !app.summary && !power_open && !app.miners.is_empty();
     let show_bar = !neural_open || app.neural_hint_ms > 0;
-    let lower = if summary_open {
+    let lower = if power_open {
+        power_monitor_view(app, width, height)
+    } else if summary_open {
         summary_view(app, width, height)
     } else if neural_open {
         neural_board(app, width, height, show_bar)
@@ -9478,11 +9567,15 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
                     inset_right: 0.0,
                     inset_bottom: 0.0,
                     inset_left: 0.0,
-                    justify_content: Justify::Center,
+                    justify_content: if !app.power.ready() || app.neural {
+                        Justify::Center
+                    } else {
+                        Justify::Start
+                    },
                     cross_align: CrossAlign::Center,
-                    gap: 18.0,
+                    gap: 0.0,
                 ),
-                neural_clock_group(app),
+                header_clock(app),
             ),
             row(
                 props!(
@@ -9500,13 +9593,13 @@ fn fleet_view(app: &App, width: f32, height: f32) -> Node {
                             wordmark(42),
                         ],
                     ),
-                    header_controls,
+                    header_controls(app),
                 ],
             ),
         ],
     ));
     }
-    if !neural_open && !summary_open {
+    if !neural_open && !summary_open && !power_open {
         stack.push(metrics);
     }
     stack.push(list);
@@ -9710,42 +9803,42 @@ fn fleet_list(app: &App, width: f32, height: f32) -> Node {
     if app.miners.is_empty() {
         let ip = bmc_wasm_sdk::network::info().ip;
         let ip_shown = if ip.is_empty() { "—".to_owned() } else { ip };
-        return row(
-            props!(height: list_h, gap: 28.0, cross_align: CrossAlign::Center),
+        return col(
+            props!(
+                height: list_h,
+                gap: 6.0,
+                width: (width - 48.0).max(360.0),
+                padding: 24.0,
+                justify_content: Justify::Center,
+            ),
             [
-                qr_tile(200.0, DOWNLOAD_URL),
-                col(
-                    props!(gap: 6.0, width: (width - 260.0).max(360.0)),
-                    [
-                        text(
-                            "Congrats. HashWatcher is on your Deck.",
-                            style!(size: 26, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
-                        ),
-                        text(
-                            ip_shown,
-                            style!(size: 48, weight: FontWeight::BOLD, color: EMERALD, line_height: 1.0),
-                        ),
-                        text(
-                            "Look for this IP in the scan results.",
-                            style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.1),
-                        ),
-                        text(
-                            "Add Miner, then Scan All. Scan the code to install the app.",
-                            style!(size: 18, color: LABEL, line_height: 1.2),
-                        ),
-                        text(
-                            "Pairing code",
-                            style!(size: 18, weight: FontWeight::SEMIBOLD, color: LABEL, line_height: 1.0),
-                        ),
-                        text(
-                            app.pair_code.clone(),
-                            style!(size: 64, weight: FontWeight::BOLD, color: WHITE, line_height: 0.9),
-                        ),
-                        text(
-                            "In HashWatcher, open Braiins Deck Remote and enter this code.",
-                            style!(size: 18, color: LABEL, line_height: 1.1),
-                        ),
-                    ],
+                text(
+                    "Congrats. HashWatcher is on your Deck.",
+                    style!(size: 26, weight: FontWeight::BOLD, color: WHITE, line_height: 1.0),
+                ),
+                text(
+                    ip_shown,
+                    style!(size: 48, weight: FontWeight::BOLD, color: EMERALD, line_height: 1.0),
+                ),
+                text(
+                    "Look for this IP in the scan results.",
+                    style!(size: 22, weight: FontWeight::BOLD, color: WHITE, line_height: 1.1),
+                ),
+                text(
+                    "Add Miner, then Scan All.",
+                    style!(size: 18, color: LABEL, line_height: 1.2),
+                ),
+                text(
+                    "Pairing code",
+                    style!(size: 18, weight: FontWeight::SEMIBOLD, color: LABEL, line_height: 1.0),
+                ),
+                text(
+                    app.pair_code.clone(),
+                    style!(size: 64, weight: FontWeight::BOLD, color: WHITE, line_height: 0.9),
+                ),
+                text(
+                    "In HashWatcher, open Braiins Deck Remote and enter this code.",
+                    style!(size: 18, color: LABEL, line_height: 1.1),
                 ),
             ],
         );
@@ -10794,39 +10887,6 @@ fn stat_tile(label: &str, value: &str, color: Color, width: f32, height: f32) ->
     )
 }
 
-fn qr_tile(size: f32, payload: &str) -> Node {
-    let inner = (size - 16.0).max(40.0);
-    col(
-        props!(
-            width: size,
-            height: size,
-            background: WHITE,
-            border_radius: 8.0,
-            padding: 8.0,
-        ),
-        [canvas(
-            props!(width: inner, height: inner),
-            [Draw::qr(
-                0.0,
-                0.0,
-                inner,
-                payload,
-                QrStyle {
-                    dark: BLACK,
-                    light: WHITE,
-                    quiet_zone: 2,
-                },
-            )],
-        )],
-    )
-}
-
-fn support_mail() -> String {
-    format!(
-        "mailto:info@engineeredessentials.com?subject=Braiins%20Deck%20Support&body=%0A%0A%0A%0A%0AVersion%20{DECK_VERSION}"
-    )
-}
-
 fn clipped(value: impl Into<String>, size: u32, weight: FontWeight, color: Color, width: f32) -> Node {
     text(
         value.into(),
@@ -11582,6 +11642,19 @@ pub extern "C" fn render(delta_ms: u32) {
                 app.saver_on = true;
                 app.neural_hint_ms = 0;
             }
+        }
+        let every = (app.poll_ms / 1_000).max(1);
+        let sha: f64 = app
+            .miners
+            .iter()
+            .filter(|miner| miner.family != "bitmainZEC")
+            .map(|miner| miner.hashrate_ths.unwrap_or(0.0))
+            .sum();
+        app.power.set_hashrate(Some(sha as f32), every);
+        app.power.commit_hashrate();
+        app.power.pump(delta_ms);
+        if app.power.take_persist() {
+            app.touch_controls();
         }
         app.maybe_check_update(delta_ms);
         matches!(app.phase, Phase::Http | Phase::Tcp)
