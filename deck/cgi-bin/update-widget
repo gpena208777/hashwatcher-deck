@@ -39,15 +39,17 @@ wget -q -O "$tmp" -T 90 -U HashWatcher-Deck "$url" || exit 1
 printf '\0asm' > /tmp/hashwatcher.wasm.magic
 head -c 4 "$tmp" | cmp -s - /tmp/hashwatcher.wasm.magic || exit 1
 
-wasm=/mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm
-live=$(ps -o args 2>/dev/null | sed -n 's/.*--wasm \([^ ]*hashwatcher\.wasm\).*/\1/p' | head -n 1)
-case "$live" in
-/mnt/*hashwatcher.wasm) wasm=$live ;;
-esac
-cp "$tmp" "$wasm" || exit 1
-mkdir -p /mnt/data/bmc/widgets/hashwatcher
+mkdir -p /mnt/data/bmc/widgets/hashwatcher/lib/wasm
+cp "$tmp" /mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm || exit 1
 printf '%s\n' "$version" > /mnt/data/bmc/widgets/hashwatcher/version
-pid=$(ps -o pid,args 2>/dev/null | awk '/hashwatcher\.wasm/ && !/awk/ { print $1; exit }')
-if [ -n "$pid" ]; then
-	kill "$pid" || true
+
+# The downloaded wasm is not enough. The Deck rebuilds its package profile from
+# the registered list, and a file left only in /mnt/data is dropped when another
+# widget updates. register-package.sh adds HashWatcher to that list.
+script=/tmp/hashwatcher-register-package.sh
+wget -q -O "$script" -T 25 -U HashWatcher-Deck \
+	https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck/register-package.sh || exit 1
+sh "$script" /mnt/data/bmc/widgets/hashwatcher "$version" || exit 1
+if [ -x /etc/init.d/bmc-compositor ]; then
+	/etc/init.d/bmc-compositor restart >/dev/null 2>&1 || true
 fi

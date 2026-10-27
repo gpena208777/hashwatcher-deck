@@ -19,9 +19,13 @@ SSH in as root. The password is blank unless I say otherwise. Build the crate at
 
 cargo build -p hashwatcher --target wasm32-unknown-unknown --release
 
-Strip the wasm with bmc-wasm-assets, pack it as bmc-widget-hashwatcher, and install it with nix-store --add and bmc-nix-cli add-packages --name widget-hashwatcher --version 0.1.0.
+Put the stripped wasm, assets, manifest, and thin binary in /mnt/data/bmc/widgets/hashwatcher. Then register that directory as a Deck package. Do not symlink it into /nix/var/nix/gcroots/profiles/bmc. That directory is rebuilt from the package list when any other widget updates, and a symlink there is deleted.
 
-Add one fullscreen scene for widget uid c4e8a1d2-7b63-4f0e-9a15-6d2b8f0c3e71. Keep every scene and setting already in /etc/bmc/config.json. Write the file, then run killall bmc-openwrt so the Deck reloads it. Leave other widgets installed.
+curl -fsSL https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck/register-package.sh -o /tmp/register-package.sh
+sh /tmp/register-package.sh /mnt/data/bmc/widgets/hashwatcher
+/etc/init.d/bmc-compositor restart
+
+Add one fullscreen scene for widget uid c4e8a1d2-7b63-4f0e-9a15-6d2b8f0c3e71 if that scene is not already there. Keep every scene and setting already in /etc/bmc/config.json. Leave other widgets installed.
 
 Do not add miners and do not store miner passwords. I will send the fleet from HashWatcher.
 ```
