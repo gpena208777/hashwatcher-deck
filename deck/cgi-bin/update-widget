@@ -43,6 +43,13 @@ head -c 4 "$tmp" | cmp -s - /tmp/hashwatcher.wasm.magic || exit 1
 
 mkdir -p /mnt/data/bmc/widgets/hashwatcher/lib/wasm
 cp "$tmp" /mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm || exit 1
+assets=https://github.com/gpena208777/hashwatcher-deck/releases/download/v"$version"/hashwatcher-assets.tar
+assets_tmp=/tmp/hashwatcher-assets.tar
+rm -f "$assets_tmp"
+wget -q -O "$assets_tmp" -T 90 -U HashWatcher-Deck "$assets" || exit 1
+rm -rf /mnt/data/bmc/widgets/hashwatcher/lib/assets
+mkdir -p /mnt/data/bmc/widgets/hashwatcher/lib/assets
+tar -xf "$assets_tmp" -C /mnt/data/bmc/widgets/hashwatcher/lib/assets || exit 1
 printf '%s\n' "$version" > /mnt/data/bmc/widgets/hashwatcher/version
 
 # Packaging helpers must sit in one directory: register-package calls assemble beside itself.

@@ -18,7 +18,7 @@
 #     lib/wasm/hashwatcher.wasm
 #     assets/icon.svg
 #
-# Usage: assemble-package.sh <dest-root> <wasm-path> [manifest-path] [icon-path]
+# Usage: assemble-package.sh <dest-root> <wasm-path> [manifest-path] [icon-path] [asset-root]
 # dest-root receives the lib/ tree (it is created if missing).
 set -eu
 
@@ -26,6 +26,7 @@ DEST_ROOT=${1:?dest-root required}
 WASM=${2:?wasm path required}
 MANIFEST=${3:-}
 ICON=${4:-}
+ASSET_SRC=${5:-}
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
@@ -67,6 +68,11 @@ cp "$ICON" "$DEST/assets/icon.svg"
 # Deck .nar validation requires a byte-for-byte match.
 cp "$SCRIPT_DIR/hashwatcher-launcher.sh" "$DEST/bin/$WIDGET"
 chmod 755 "$DEST/bin/$WIDGET"
+# The wasm references compiled images under lib/assets. An empty directory
+# makes the widget crash on startup and the Deck stays on Loading Scene.
+if [ -n "$ASSET_SRC" ] && [ -d "$ASSET_SRC" ]; then
+	cp -a "$ASSET_SRC"/. "$DEST/lib/assets"/
+fi
 
 find "$DEST" -name '._*' -exec rm -f {} + 2>/dev/null || true
 find "$DEST" -name '*.wasm.bak*' -exec rm -f {} + 2>/dev/null || true

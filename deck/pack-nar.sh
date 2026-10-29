@@ -13,8 +13,9 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-WASM=${1:?usage: pack-nar.sh <wasm-path> [output.nar]}
+WASM=${1:?usage: pack-nar.sh <wasm-path> [output.nar] [asset-root]}
 OUT=${2:-"$REPO_ROOT/dist/hashwatcher.nar"}
+ASSET_SRC=${3:-}
 
 [ -f "$WASM" ] || {
 	echo "wasm missing: $WASM" >&2
@@ -26,7 +27,7 @@ trap 'rm -rf "$work"' EXIT
 root="$work/package-root"
 mkdir -p "$root"
 
-"$SCRIPT_DIR/assemble-package.sh" "$root" "$WASM" >/dev/null
+"$SCRIPT_DIR/assemble-package.sh" "$root" "$WASM" "" "" "$ASSET_SRC" >/dev/null
 
 mkdir -p "$(dirname "$OUT")"
 if command -v nix-store >/dev/null 2>&1; then

@@ -52,7 +52,7 @@ if [ ! -f "$ICON" ]; then
 	ICON="$SCRIPT_DIR/../assets/icon.svg"
 fi
 
-"$SCRIPT_DIR/assemble-package.sh" "$root" "$WIDGET/lib/wasm/hashwatcher.wasm" "$WIDGET/manifest.json" "$ICON" >/dev/null
+"$SCRIPT_DIR/assemble-package.sh" "$root" "$WIDGET/lib/wasm/hashwatcher.wasm" "$WIDGET/manifest.json" "$ICON" "$WIDGET/lib/assets" >/dev/null
 
 store=$(nix-store --add "$root")
 bmc-nix-cli add-packages \
