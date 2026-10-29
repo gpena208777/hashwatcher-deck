@@ -1,8 +1,18 @@
 #!/bin/sh
-# Assemble a HashWatcher third-party widget package tree for Deck upload or
-# SSH registration. Layout matches BraiinsForge/bmc-main docs/uploading-wasm-widgets.md:
+# Assemble a HashWatcher widget package tree for Deck upload or registration.
 #
-#   lib/bmc-widgets/hashwatcher/hashwatcher/
+# Field Decks already have this widget as a flat package:
+#   lib/bmc-widgets/hashwatcher/
+#   package name widget-hashwatcher
+#
+# A maintainer folder also named hashwatcher
+# (lib/bmc-widgets/hashwatcher/hashwatcher/) is refused on those Decks:
+# "hashwatcher/hashwatcher cannot be installed next to the installed widget
+# hashwatcher: only one of them would show". The same uid under any other
+# folder is refused too. Keep this flat so Install Widget replaces the
+# installed package in place.
+#
+#   lib/bmc-widgets/hashwatcher/
 #     manifest.json
 #     bin/hashwatcher          # official WASM launcher (SDK major 0)
 #     lib/wasm/hashwatcher.wasm
@@ -44,9 +54,8 @@ fi
 	exit 1
 }
 
-MAINTAINER=hashwatcher
 WIDGET=hashwatcher
-DEST="$DEST_ROOT/lib/bmc-widgets/$MAINTAINER/$WIDGET"
+DEST="$DEST_ROOT/lib/bmc-widgets/$WIDGET"
 
 rm -rf "$DEST_ROOT/lib"
 mkdir -p "$DEST/bin" "$DEST/lib/wasm" "$DEST/assets" "$DEST/lib/assets"

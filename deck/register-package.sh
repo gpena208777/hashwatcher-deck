@@ -3,9 +3,11 @@
 # The profile is rebuilt from this list when any other widget updates.
 # A symlink added under the live profile generation is not on that list, so the next update removes it.
 #
-# Package layout is the third-party maintainer form used by .nar upload:
-#   lib/bmc-widgets/hashwatcher/hashwatcher/
-# Package name: widget-hashwatcher_hashwatcher
+# Flat package, same identity as the widget already on field Decks:
+#   lib/bmc-widgets/hashwatcher/
+# Package name: widget-hashwatcher
+# Do not nest a hashwatcher/ maintainer folder. The Deck refuses that beside
+# the installed flat widget, and a second folder with the same uid.
 set -eu
 
 PATH="/run/current-profile/bin:$PATH"
@@ -54,7 +56,7 @@ fi
 
 store=$(nix-store --add "$root")
 bmc-nix-cli add-packages \
-	--name widget-hashwatcher_hashwatcher \
+	--name widget-hashwatcher \
 	--version "$VERSION" \
 	--store-path "$store"
-echo "Registered widget-hashwatcher_hashwatcher $VERSION at $store"
+echo "Registered widget-hashwatcher $VERSION at $store"
