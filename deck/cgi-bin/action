@@ -1,0 +1,19 @@
+#!/bin/sh
+# Localhost-only control for the Tailscale supervisor. uhttpd serves this from cgi-bin.
+printf 'Content-Type: application/json\r\n\r\n'
+cmd=$(printf '%s' "$QUERY_STRING" | sed 's/[^a-z].*//')
+case "$cmd" in
+stop|start|restart|relogin|reset)
+	printf '%s\n' "$cmd" > /mnt/data/tailscale/cmd
+	printf '{"ok":true,"cmd":"%s"}\n' "$cmd"
+	;;
+update)
+	# Return immediately. The download and restart continue after this process exits.
+	printf '{"ok":true,"cmd":"update"}\n'
+	trap '' HUP
+	/mnt/data/tailscale/www/cgi-bin/update-widget >>/mnt/data/hashwatcher-update.log 2>&1 &
+	;;
+*)
+	printf '{"ok":false}\n'
+	;;
+esac

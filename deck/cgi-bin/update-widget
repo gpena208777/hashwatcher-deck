@@ -1,0 +1,61 @@
+#!/bin/sh
+# Install a newer HashWatcher widget published on GitHub, then restart it.
+# Only accepts the wasm named by deck/release.json on the HashWatcher Deck repo.
+trap '' HUP
+LOCK=/tmp/hashwatcher-update.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+	exit 0
+fi
+trap 'rmdir "$LOCK"' EXIT
+
+BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
+
+manifest=$(wget -q -O - -T 25 -U HashWatcher-Deck \
+	"$BASE/release.json") || exit 1
+version=$(printf '%s' "$manifest" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+url=$(printf '%s' "$manifest" | sed -n 's/.*"wasm"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+case "$version" in
+''|*[!0-9.]*) exit 1 ;;
+esac
+case "$url" in
+https://github.com/gpena208777/hashwatcher-deck/releases/download/v"$version"/hashwatcher.wasm) ;;
+*) exit 1 ;;
+esac
+
+installed=$(cat /mnt/data/bmc/widgets/hashwatcher/version 2>/dev/null || true)
+if [ -n "$installed" ]; then
+	newer=$(awk -v remote="$version" -v local="$installed" 'BEGIN {
+		split(remote, r, "."); split(local, l, ".");
+		for (i = 1; i <= 3; i++) {
+			if (r[i] + 0 > l[i] + 0) { print 1; exit }
+			if (r[i] + 0 < l[i] + 0) { print 0; exit }
+		}
+		print 0
+	}')
+	[ "$newer" = 1 ] || exit 0
+fi
+
+tmp=/tmp/hashwatcher.wasm.new
+rm -f "$tmp"
+wget -q -O "$tmp" -T 90 -U HashWatcher-Deck "$url" || exit 1
+printf '\0asm' > /tmp/hashwatcher.wasm.magic
+head -c 4 "$tmp" | cmp -s - /tmp/hashwatcher.wasm.magic || exit 1
+
+mkdir -p /mnt/data/bmc/widgets/hashwatcher/lib/wasm
+cp "$tmp" /mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm || exit 1
+printf '%s\n' "$version" > /mnt/data/bmc/widgets/hashwatcher/version
+
+# Packaging helpers must sit in one directory: register-package calls assemble beside itself.
+pkg=$(mktemp -d)
+trap 'rm -rf "$pkg"; rmdir "$LOCK"' EXIT
+wget -q -O "$pkg/register-package.sh" -T 25 -U HashWatcher-Deck \
+	"$BASE/register-package.sh" || exit 1
+wget -q -O "$pkg/assemble-package.sh" -T 25 -U HashWatcher-Deck \
+	"$BASE/assemble-package.sh" || exit 1
+wget -q -O "$pkg/hashwatcher-launcher.sh" -T 25 -U HashWatcher-Deck \
+	"$BASE/hashwatcher-launcher.sh" || exit 1
+chmod +x "$pkg/register-package.sh" "$pkg/assemble-package.sh" "$pkg/hashwatcher-launcher.sh"
+sh "$pkg/register-package.sh" /mnt/data/bmc/widgets/hashwatcher "$version" || exit 1
+if [ -x /etc/init.d/bmc-compositor ]; then
+	/etc/init.d/bmc-compositor restart >/dev/null 2>&1 || true
+fi
