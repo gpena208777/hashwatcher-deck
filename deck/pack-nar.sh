@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build a HashWatcher .nar for Display Widgets → Install Widget on the Deck.
 #
-# Requires: nix-store (from Nix), and a built hashwatcher.wasm
+# Requires a built hashwatcher.wasm. Uses nix-store --dump when available,
+# otherwise deck/dump-nar.py (Python 3).
 #
 # Usage:
 #   deck/pack-nar.sh path/to/hashwatcher.wasm [output.nar]
@@ -15,10 +16,6 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 WASM=${1:?usage: pack-nar.sh <wasm-path> [output.nar]}
 OUT=${2:-"$REPO_ROOT/dist/hashwatcher.nar"}
 
-command -v nix-store >/dev/null 2>&1 || {
-	echo "nix-store is required. Install Nix, then re-run." >&2
-	exit 1
-}
 [ -f "$WASM" ] || {
 	echo "wasm missing: $WASM" >&2
 	exit 1
@@ -32,8 +29,11 @@ mkdir -p "$root"
 "$SCRIPT_DIR/assemble-package.sh" "$root" "$WASM" >/dev/null
 
 mkdir -p "$(dirname "$OUT")"
-# Dump the directory that holds lib/ — that is the package root Braiins expects.
-nix-store --dump "$root" >"$OUT"
+if command -v nix-store >/dev/null 2>&1; then
+	nix-store --dump "$root" >"$OUT"
+else
+	python3 "$SCRIPT_DIR/dump-nar.py" "$root" "$OUT"
+fi
 
 bytes=$(wc -c <"$OUT" | tr -d ' ')
 echo "Wrote $OUT ($bytes bytes)"
