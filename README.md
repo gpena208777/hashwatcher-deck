@@ -27,14 +27,14 @@ Build the WASM inside a [bmc-main](https://github.com/BraiinsForge/bmc-main) che
 cargo build -p hashwatcher --target wasm32-unknown-unknown --release
 ```
 
-Then from this repo (Nix/`nix-store` required):
+Then from this repo (uses `nix-store` when present, otherwise Python 3):
 
 ```bash
 ./deck/pack-nar.sh /path/to/bmc-main/target/wasm32-unknown-unknown/release/hashwatcher.wasm
 # → dist/hashwatcher.nar
 ```
 
-Package layout follows [Braiins’ upload guide](https://github.com/BraiinsForge/bmc-main/blob/master/docs/uploading-wasm-widgets.md).
+Package layout follows [Braiins’ upload guide](https://github.com/BraiinsForge/bmc-main/blob/master/docs/uploading-wasm-widgets.md). A ready-made `hashwatcher.nar` is on the [latest release](https://github.com/gpena208777/hashwatcher-deck/releases/latest).
 
 ### Install over SSH (fallback)
 
