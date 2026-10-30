@@ -17,10 +17,14 @@ install)
 	fi
 	;;
 update)
-	# Return immediately. The download and restart continue after this process exits.
+	# HashWatcher software update. Tailscale does not have to be installed.
 	printf '{"ok":true,"cmd":"update"}\n'
 	trap '' HUP
-	/mnt/data/tailscale/www/cgi-bin/update-widget >>/mnt/data/hashwatcher-update.log 2>&1 &
+	if [ -x /mnt/data/hashwatcher/update-widget ]; then
+		start-stop-daemon -S -b -x /mnt/data/hashwatcher/update-widget || true
+	elif [ -x /mnt/data/tailscale/www/cgi-bin/update-widget ]; then
+		start-stop-daemon -S -b -x /mnt/data/tailscale/www/cgi-bin/update-widget || true
+	fi
 	;;
 *)
 	printf '{"ok":false}\n'

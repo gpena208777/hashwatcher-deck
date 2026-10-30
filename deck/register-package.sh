@@ -69,6 +69,12 @@ plant_tailscale_installer() {
 	wget -q -O /mnt/data/hashwatcher/scan-leds.sh -T 25 -U HashWatcher-Deck \
 		"$base/scan-leds.sh" || return 1
 	chmod 755 /mnt/data/hashwatcher/scan-leds.sh
+	wget -q -O /mnt/data/hashwatcher/update-widget -T 25 -U HashWatcher-Deck \
+		"$base/cgi-bin/update-widget" || return 1
+	chmod 755 /mnt/data/hashwatcher/update-widget
+	wget -q -O /mnt/data/hashwatcher/supervise.sh -T 25 -U HashWatcher-Deck \
+		"$base/supervise.sh" || return 1
+	chmod 755 /mnt/data/hashwatcher/supervise.sh
 	if [ -d /www/cgi-bin ]; then
 		wget -q -O /www/cgi-bin/hashwatcher-install-tailscale -T 25 -U HashWatcher-Deck \
 			"$base/cgi-bin/hashwatcher-install-tailscale" || return 1
@@ -82,9 +88,12 @@ plant_tailscale_installer() {
 			"$base/cgi-bin/hashwatcher-settings" || return 1
 		wget -q -O /www/cgi-bin/hashwatcher-update-status -T 25 -U HashWatcher-Deck \
 			"$base/cgi-bin/hashwatcher-update-status" || return 1
+		wget -q -O /www/cgi-bin/hashwatcher-update -T 25 -U HashWatcher-Deck \
+			"$base/cgi-bin/hashwatcher-update" || return 1
 		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale /www/cgi-bin/hashwatcher-install-status \
 			/www/cgi-bin/hashwatcher-play-sound /www/cgi-bin/hashwatcher-led \
-			/www/cgi-bin/hashwatcher-settings /www/cgi-bin/hashwatcher-update-status
+			/www/cgi-bin/hashwatcher-settings /www/cgi-bin/hashwatcher-update-status \
+			/www/cgi-bin/hashwatcher-update
 	fi
 	if [ -d /mnt/data/tailscale/www/cgi-bin ]; then
 		wget -q -O /mnt/data/tailscale/www/cgi-bin/update-widget -T 25 -U HashWatcher-Deck \

@@ -76,7 +76,10 @@ if [ -n "$installed" ]; then
 		}
 		print 0
 	}')
-	[ "$newer" = 1 ] || exit 0
+	[ "$newer" = 1 ] || {
+		say idle 0 ""
+		exit 0
+	}
 fi
 
 say downloading 1 ""

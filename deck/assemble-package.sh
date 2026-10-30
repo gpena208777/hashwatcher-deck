@@ -68,26 +68,31 @@ cp "$ICON" "$DEST/assets/icon.svg"
 # Deck .nar validation requires a byte-for-byte match.
 cp "$SCRIPT_DIR/hashwatcher-launcher.sh" "$DEST/bin/$WIDGET"
 chmod 755 "$DEST/bin/$WIDGET"
-# Helpers the launcher copies onto the Deck. Install Widget does not run
-# register-package.sh, so these have to travel inside the package.
+# Helpers the launcher copies onto the Deck. A Deck update downloads this
+# script by itself, so missing files are fetched from the public repo.
+# Install Widget does not run register-package.sh, so they travel in the package.
+SHARE_BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
 mkdir -p "$DEST/share"
-for name in install-tailscale.sh scan-leds.sh supervise.sh coin.wav; do
-	if [ -f "$SCRIPT_DIR/$name" ]; then
-		cp "$SCRIPT_DIR/$name" "$DEST/share/$name"
+place_share() {
+	dest=$1
+	localpath=$2
+	url=$3
+	if [ -f "$localpath" ]; then
+		cp "$localpath" "$dest"
+		return 0
 	fi
-done
+	wget -q -O "$dest" -T 25 -U HashWatcher-Deck "$url"
+}
+place_share "$DEST/share/install-tailscale.sh" "$SCRIPT_DIR/install-tailscale.sh" "$SHARE_BASE/install-tailscale.sh"
+place_share "$DEST/share/scan-leds.sh" "$SCRIPT_DIR/scan-leds.sh" "$SHARE_BASE/scan-leds.sh"
+place_share "$DEST/share/supervise.sh" "$SCRIPT_DIR/supervise.sh" "$SHARE_BASE/supervise.sh"
+place_share "$DEST/share/coin.wav" "$SCRIPT_DIR/coin.wav" "$SHARE_BASE/coin.wav"
+place_share "$DEST/share/action" "$SCRIPT_DIR/cgi-bin/action" "$SHARE_BASE/cgi-bin/action"
+place_share "$DEST/share/update-widget" "$SCRIPT_DIR/cgi-bin/update-widget" "$SHARE_BASE/cgi-bin/update-widget"
 for name in hashwatcher-install-tailscale hashwatcher-install-status hashwatcher-play-sound \
-	hashwatcher-led hashwatcher-settings hashwatcher-update-status; do
-	if [ -f "$SCRIPT_DIR/cgi-bin/$name" ]; then
-		cp "$SCRIPT_DIR/cgi-bin/$name" "$DEST/share/$name"
-	fi
+	hashwatcher-led hashwatcher-settings hashwatcher-update-status hashwatcher-update; do
+	place_share "$DEST/share/$name" "$SCRIPT_DIR/cgi-bin/$name" "$SHARE_BASE/cgi-bin/$name"
 done
-if [ -f "$SCRIPT_DIR/cgi-bin/action" ]; then
-	cp "$SCRIPT_DIR/cgi-bin/action" "$DEST/share/action"
-fi
-if [ -f "$SCRIPT_DIR/cgi-bin/update-widget" ]; then
-	cp "$SCRIPT_DIR/cgi-bin/update-widget" "$DEST/share/update-widget"
-fi
 chmod 755 "$DEST/share/"* 2>/dev/null || true
 # The wasm references compiled images under lib/assets. An empty directory
 # makes the widget crash on startup and the Deck stays on Loading Scene.

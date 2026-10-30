@@ -14,7 +14,7 @@ if [ -d "$share" ]; then
 		/mnt/data/hashwatcher/supervise.sh /mnt/data/hashwatcher/action \
 		/mnt/data/hashwatcher/update-widget 2>/dev/null || true
 	for name in hashwatcher-install-tailscale hashwatcher-install-status hashwatcher-play-sound \
-		hashwatcher-led hashwatcher-settings hashwatcher-update-status; do
+		hashwatcher-led hashwatcher-settings hashwatcher-update-status hashwatcher-update; do
 		if [ -f "$share/$name" ]; then
 			cp "$share/$name" "/www/cgi-bin/$name" || true
 			chmod 755 "/www/cgi-bin/$name" || true

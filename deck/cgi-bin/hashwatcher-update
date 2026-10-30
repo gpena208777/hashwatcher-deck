@@ -1,0 +1,26 @@
+#!/bin/sh
+# Start a HashWatcher software update. This is the Deck widget, not Tailscale.
+# Local requests only. The script lives with the widget package.
+printf 'Content-Type: application/json\r\n\r\n'
+case "$REMOTE_ADDR" in
+127.0.0.1|::1) ;;
+*)
+	printf '{"ok":false}\n'
+	exit 0
+	;;
+esac
+if [ ! -x /mnt/data/hashwatcher/update-widget ]; then
+	printf '{"ok":false,"error":"updater missing"}\n'
+	exit 0
+fi
+if [ -d /tmp/hashwatcher-update.lock ]; then
+	printf '{"ok":true,"cmd":"update"}\n'
+	exit 0
+fi
+mkdir -p /mnt/data/hashwatcher
+printf '{"ok":true,"cmd":"update"}\n'
+trap '' HUP
+if ! start-stop-daemon -S -b -x /mnt/data/hashwatcher/update-widget; then
+	printf '{"state":"failed","progress":0,"error":"Could not start the update."}\n' \
+		> /mnt/data/hashwatcher/update-status.json
+fi
