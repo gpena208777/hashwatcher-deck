@@ -68,6 +68,27 @@ cp "$ICON" "$DEST/assets/icon.svg"
 # Deck .nar validation requires a byte-for-byte match.
 cp "$SCRIPT_DIR/hashwatcher-launcher.sh" "$DEST/bin/$WIDGET"
 chmod 755 "$DEST/bin/$WIDGET"
+# Helpers the launcher copies onto the Deck. Install Widget does not run
+# register-package.sh, so these have to travel inside the package.
+mkdir -p "$DEST/share"
+for name in install-tailscale.sh scan-leds.sh supervise.sh coin.wav; do
+	if [ -f "$SCRIPT_DIR/$name" ]; then
+		cp "$SCRIPT_DIR/$name" "$DEST/share/$name"
+	fi
+done
+for name in hashwatcher-install-tailscale hashwatcher-install-status hashwatcher-play-sound \
+	hashwatcher-led hashwatcher-settings hashwatcher-update-status; do
+	if [ -f "$SCRIPT_DIR/cgi-bin/$name" ]; then
+		cp "$SCRIPT_DIR/cgi-bin/$name" "$DEST/share/$name"
+	fi
+done
+if [ -f "$SCRIPT_DIR/cgi-bin/action" ]; then
+	cp "$SCRIPT_DIR/cgi-bin/action" "$DEST/share/action"
+fi
+if [ -f "$SCRIPT_DIR/cgi-bin/update-widget" ]; then
+	cp "$SCRIPT_DIR/cgi-bin/update-widget" "$DEST/share/update-widget"
+fi
+chmod 755 "$DEST/share/"* 2>/dev/null || true
 # The wasm references compiled images under lib/assets. An empty directory
 # makes the widget crash on startup and the Deck stays on Loading Scene.
 if [ -n "$ASSET_SRC" ] && [ -d "$ASSET_SRC" ]; then

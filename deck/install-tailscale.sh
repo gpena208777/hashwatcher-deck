@@ -1,5 +1,6 @@
 #!/bin/sh
-# Download Tailscale when the user asks. The widget package does not contain it.
+# Download the official Tailscale build. The widget package starts this when
+# Tailscale is not installed yet. The binary itself is not stored in the package.
 # The download stays on /mnt/data. /tmp is a small RAM disk and cannot hold the archive.
 trap '' HUP
 mkdir -p /mnt/data/hashwatcher
@@ -187,7 +188,16 @@ if [ ! -x "$DIR/tailscale" ] || [ ! -x "$DIR/tailscaled" ]; then
 fi
 
 say installing 96 ""
-wget -q -O "$DIR/supervise.sh" -T 25 -U HashWatcher-Deck "$BASE/supervise.sh" || fail "Could not download Tailscale."
+take() {
+	dest=$1
+	localname=$2
+	url=$3
+	if [ -f "/mnt/data/hashwatcher/$localname" ]; then
+		cp "/mnt/data/hashwatcher/$localname" "$dest" && return 0
+	fi
+	wget -q -O "$dest" -T 25 -U HashWatcher-Deck "$url"
+}
+take "$DIR/supervise.sh" supervise.sh "$BASE/supervise.sh" || fail "Could not download Tailscale."
 chmod 755 "$DIR/supervise.sh"
 # Start login as soon as the binary is on disk so the sign-in code is ready
 # when the progress bar finishes, instead of after another round trip.
@@ -195,8 +205,8 @@ printf '%s\n' up > "$DIR/want"
 if ! { [ -f "$DIR/supervise.pid" ] && kill -0 "$(cat "$DIR/supervise.pid")" 2>/dev/null; }; then
 	"$DIR/supervise.sh" >>"$DIR/supervise.log" 2>&1 &
 fi
-wget -q -O "$DIR/www/cgi-bin/action" -T 25 -U HashWatcher-Deck "$BASE/cgi-bin/action" || fail "Could not download Tailscale."
-wget -q -O "$DIR/www/cgi-bin/update-widget" -T 25 -U HashWatcher-Deck "$BASE/cgi-bin/update-widget" || fail "Could not download Tailscale."
+take "$DIR/www/cgi-bin/action" action "$BASE/cgi-bin/action" || fail "Could not download Tailscale."
+take "$DIR/www/cgi-bin/update-widget" update-widget "$BASE/cgi-bin/update-widget" || fail "Could not download Tailscale."
 chmod 755 "$DIR/www/cgi-bin/action" "$DIR/www/cgi-bin/update-widget"
 
 if ! grep -q '/mnt/data/tailscale/supervise.sh' /etc/rc.local 2>/dev/null; then
