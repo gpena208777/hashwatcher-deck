@@ -24,7 +24,7 @@ start_daemon() {
 		--port=41641 \
 		>>"$DIR/tailscaled.log" 2>&1 &
 	echo $! > "$DIR/tailscaled.pid"
-	sleep 1
+	pause 300000000
 }
 
 start_http() {
@@ -44,6 +44,12 @@ write_status() {
 	printf '{"state":"%s","hostname":"%s","ip":"%s","login_url":"%s","subnet":"%s","key_expiry":"%s","admin_url":"%s"}\n' \
 		"$1" "$2" "$3" "$4" "$5" "$6" "$7" > "$tmp"
 	mv "$tmp" "$STATUS"
+}
+
+# Nanoseconds. BusyBox sleep is whole seconds only, which is what made the
+# sign-in code sit on screen for about a second after Tailscale printed it.
+pause() {
+	lua -e "require('nixio').nanosleep(0, ${1:-1000000000})" >/dev/null 2>&1 || sleep 1
 }
 
 self_json() {
@@ -194,7 +200,7 @@ apply_cmd() {
 start_login() {
 	if up_alive; then
 		kill "$(cat "$DIR/up.pid")" 2>/dev/null
-		sleep 1
+		pause 200000000
 	fi
 	: > "$DIR/up.log"
 	route=$(cat "$DIR/route" 2>/dev/null)
@@ -228,6 +234,16 @@ while true; do
 	start_daemon
 	start_http
 	apply_cmd
+	# Publish the sign-in link the moment it lands in the log. status --json
+	# can take a while while tailscaled is still coming up.
+	early=$(login_url "")
+	if [ -n "$early" ]; then
+		cur=$(json_field "$(cat "$STATUS" 2>/dev/null)" state)
+		case "$cur" in
+		connected|stopped) ;;
+		*) write_status needs_login "HashWatcher-Deck" "" "$early" "" "" "" ;;
+		esac
+	fi
 	raw=$("$TS" --socket="$SOCK" status --json 2>/dev/null) || raw=""
 	state=$(json_field "$raw" BackendState)
 	host=$(json_field "$raw" HostName)
@@ -246,9 +262,10 @@ while true; do
 			;;
 		esac
 		write_status stopped "$host" "" "" "" "" ""
-		sleep 1
+		pause 1000000000
 		continue
 	fi
+	wait_url=0
 	case "$state" in
 	Running)
 		if up_alive; then
@@ -270,16 +287,28 @@ while true; do
 		url=$(login_url "$raw")
 		if [ -z "$url" ]; then
 			url=$(json_field "$(cat "$STATUS" 2>/dev/null)" login_url)
+			wait_url=1
 		fi
 		write_status needs_login "$host" "$ip" "$url" "$subnet" "$expiry" "$admin"
 		;;
 	Stopped)
 		start_login
 		write_status starting "$host" "$ip" "" "$subnet" "$expiry" "$admin"
+		wait_url=1
 		;;
 	*)
-		write_status starting "$host" "$ip" "" "$subnet" "$expiry" "$admin"
+		url=$(login_url "")
+		if [ -n "$url" ]; then
+			write_status needs_login "$host" "$ip" "$url" "$subnet" "$expiry" "$admin"
+		else
+			write_status starting "$host" "$ip" "" "$subnet" "$expiry" "$admin"
+			wait_url=1
+		fi
 		;;
 	esac
-	sleep 1
+	if [ "$wait_url" -eq 1 ]; then
+		pause 200000000
+	else
+		pause 1000000000
+	fi
 done

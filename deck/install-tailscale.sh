@@ -17,45 +17,62 @@ BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
 STATUS=/mnt/data/hashwatcher/install-status.json
 mkdir -p "$DIR/state" "$DIR/www/cgi-bin" /mnt/data/hashwatcher
 
+PCT=/tmp/hashwatcher-led.pct
+printf '0\n' > "$PCT"
+
 say() {
 	printf '{"state":"%s","progress":%s,"error":"%s"}\n' "$1" "$2" "$3" > "$STATUS.tmp"
 	mv "$STATUS.tmp" "$STATUS"
+	printf '%s\n' "$2" > "$PCT"
 }
 
-# Ten LEDs, lit from the left to match the percent. The compositor redraws the
-# strip about once a second, so this keeps writing while the install runs.
-led_fill() {
-	lua -e '
-		local pct = tonumber(arg[1]) or 0
-		if pct < 0 then pct = 0 end
-		if pct > 100 then pct = 100 end
-		local lit = 0
-		if pct > 0 then lit = math.floor((pct * 10 + 99) / 100) end
-		if lit > 10 then lit = 10 end
-		local f = io.open("/dev/spidev0.0", "wb")
-		if not f then return end
-		local function pix(on)
-			if on then return string.char(255, 102, 204, 0) end
-			return string.char(224, 0, 0, 0)
-		end
-		local frame = string.char(0, 0, 0, 0)
-		for i = 1, 10 do frame = frame .. pix(i <= lit) end
-		frame = frame .. string.char(255, 255, 255, 255)
-		f:write(frame)
-		f:close()
-	' "$1" >/dev/null 2>&1 || true
+# BusyBox sleep only accepts whole seconds, and the compositor blanks the
+# strip on that same one-second clock. One Lua process repaints every 100ms
+# from the percent file so the ten LEDs track the number on screen.
+lua - "$LOCK" "$PCT" <<'EOF' >/dev/null 2>&1 &
+local lock, pctfile = arg[1], arg[2]
+local nixio = require("nixio")
+local function paint(pct)
+	if pct < 0 then pct = 0 end
+	if pct > 100 then pct = 100 end
+	local full = math.floor(pct / 10)
+	local frac = pct / 10 - full
+	local f = io.open("/dev/spidev0.0", "wb")
+	if not f then return end
+	local function pix(level)
+		if level <= 0 then return string.char(224, 0, 0, 0) end
+		local bri = math.floor(level * 31 + 0.5)
+		if bri < 1 then bri = 1 end
+		if bri > 31 then bri = 31 end
+		return string.char(224 + bri, 102, 204, 0)
+	end
+	local frame = string.char(0, 0, 0, 0)
+	for i = 1, 10 do
+		local level = 0
+		if i <= full then level = 1
+		elseif i == full + 1 then level = frac end
+		frame = frame .. pix(level)
+	end
+	frame = frame .. string.char(255, 255, 255, 255)
+	f:write(frame)
+	f:close()
+end
+while os.execute("test -d '" .. lock .. "'") == 0 do
+	local pct = 0
+	local rf = io.open(pctfile, "r")
+	if rf then
+		pct = tonumber(rf:read("*a")) or 0
+		rf:close()
+	end
+	paint(pct)
+	nixio.nanosleep(0, 100000000)
+end
+paint(0)
+EOF
+
+tick() {
+	lua -e 'require("nixio").nanosleep(0, 200000000)' >/dev/null 2>&1 || sleep 1
 }
-(
-	while [ -d "$LOCK" ]; do
-		pct=$(sed -n 's/.*"progress":\([0-9][0-9]*\).*/\1/p' "$STATUS" 2>/dev/null | head -n 1)
-		case "$pct" in
-		""|*[!0-9]*) pct=0 ;;
-		esac
-		led_fill "$pct"
-		usleep 200000 2>/dev/null || sleep 1
-	done
-	led_fill 0
-) >/dev/null 2>&1 &
 
 fail() {
 	say failed 0 "$1"
@@ -125,7 +142,7 @@ if [ ! -x "$DIR/tailscale" ] || [ ! -x "$DIR/tailscaled" ]; then
 			pct=5
 		fi
 		say downloading "$pct" ""
-		sleep 1
+		tick
 	done
 	wait "$wpid" || fail "Could not download Tailscale."
 	say installing 86 ""
@@ -141,9 +158,16 @@ fi
 
 say installing 96 ""
 wget -q -O "$DIR/supervise.sh" -T 25 -U HashWatcher-Deck "$BASE/supervise.sh" || fail "Could not download Tailscale."
+chmod 755 "$DIR/supervise.sh"
+# Start login as soon as the binary is on disk so the sign-in code is ready
+# when the progress bar finishes, instead of after another round trip.
+printf '%s\n' up > "$DIR/want"
+if ! { [ -f "$DIR/supervise.pid" ] && kill -0 "$(cat "$DIR/supervise.pid")" 2>/dev/null; }; then
+	"$DIR/supervise.sh" >>"$DIR/supervise.log" 2>&1 &
+fi
 wget -q -O "$DIR/www/cgi-bin/action" -T 25 -U HashWatcher-Deck "$BASE/cgi-bin/action" || fail "Could not download Tailscale."
 wget -q -O "$DIR/www/cgi-bin/update-widget" -T 25 -U HashWatcher-Deck "$BASE/cgi-bin/update-widget" || fail "Could not download Tailscale."
-chmod 755 "$DIR/supervise.sh" "$DIR/www/cgi-bin/action" "$DIR/www/cgi-bin/update-widget"
+chmod 755 "$DIR/www/cgi-bin/action" "$DIR/www/cgi-bin/update-widget"
 
 if ! grep -q '/mnt/data/tailscale/supervise.sh' /etc/rc.local 2>/dev/null; then
 	tmp=/tmp/rc.local.hashwatcher
@@ -160,10 +184,7 @@ if ! grep -q '/mnt/data/tailscale/supervise.sh' /etc/rc.local 2>/dev/null; then
 fi
 
 say starting 98 ""
-printf '%s\n' up > "$DIR/want"
-if [ -f "$DIR/supervise.pid" ] && kill -0 "$(cat "$DIR/supervise.pid")" 2>/dev/null; then
-	say done 100 ""
-	exit 0
+if ! { [ -f "$DIR/supervise.pid" ] && kill -0 "$(cat "$DIR/supervise.pid")" 2>/dev/null; }; then
+	"$DIR/supervise.sh" >>"$DIR/supervise.log" 2>&1 &
 fi
-"$DIR/supervise.sh" >>"$DIR/supervise.log" 2>&1 &
 say done 100 ""
