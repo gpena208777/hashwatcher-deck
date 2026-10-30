@@ -71,8 +71,13 @@ plant_tailscale_installer() {
 			"$base/cgi-bin/hashwatcher-install-tailscale" || return 1
 		wget -q -O /www/cgi-bin/hashwatcher-install-status -T 25 -U HashWatcher-Deck \
 			"$base/cgi-bin/hashwatcher-install-status" || return 1
-		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale /www/cgi-bin/hashwatcher-install-status
+		wget -q -O /www/cgi-bin/hashwatcher-play-sound -T 25 -U HashWatcher-Deck \
+			"$base/cgi-bin/hashwatcher-play-sound" || return 1
+		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale /www/cgi-bin/hashwatcher-install-status \
+			/www/cgi-bin/hashwatcher-play-sound
 	fi
+	wget -q -O /mnt/data/hashwatcher/coin.wav -T 25 -U HashWatcher-Deck \
+		"$base/coin.wav" || true
 }
 
 echo "Registered widget-hashwatcher $VERSION at $store"

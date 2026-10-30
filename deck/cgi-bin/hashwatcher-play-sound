@@ -1,0 +1,37 @@
+#!/bin/sh
+# Play the share sound on the Deck speaker. The widget host on current firmware does not.
+printf 'Content-Type: application/json\r\n\r\n'
+case "$REMOTE_ADDR" in
+127.0.0.1|::1) ;;
+*)
+	printf '{"ok":false}\n'
+	exit 0
+	;;
+esac
+vol=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*vol=\([0-9][0-9]*\).*/\1/p')
+case "$vol" in
+''|*[!0-9]*) vol=100 ;;
+esac
+if [ "$vol" -gt 100 ]; then
+	vol=100
+fi
+if [ "$vol" -eq 0 ]; then
+	printf '{"ok":true}\n'
+	exit 0
+fi
+wav=/mnt/data/hashwatcher/coin.wav
+if [ ! -f "$wav" ]; then
+	printf '{"ok":false,"error":"sound missing"}\n'
+	exit 0
+fi
+printf '{"ok":true}\n'
+trap '' HUP
+(
+	cur=$(amixer get Master 2>/dev/null | sed -n 's/.*\[\([0-9][0-9]*\)%\].*/\1/p' | head -n 1)
+	case "$cur" in
+	''|*[!0-9]*) cur=100 ;;
+	esac
+	amixer set Master "$vol%" >/dev/null 2>&1
+	aplay -q "$wav" >/dev/null 2>&1
+	amixer set Master "$cur%" >/dev/null 2>&1
+) >/dev/null 2>&1 &
