@@ -75,8 +75,11 @@ plant_tailscale_installer() {
 			"$base/cgi-bin/hashwatcher-play-sound" || return 1
 		wget -q -O /www/cgi-bin/hashwatcher-led -T 25 -U HashWatcher-Deck \
 			"$base/cgi-bin/hashwatcher-led" || return 1
+		wget -q -O /www/cgi-bin/hashwatcher-settings -T 25 -U HashWatcher-Deck \
+			"$base/cgi-bin/hashwatcher-settings" || return 1
 		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale /www/cgi-bin/hashwatcher-install-status \
-			/www/cgi-bin/hashwatcher-play-sound /www/cgi-bin/hashwatcher-led
+			/www/cgi-bin/hashwatcher-play-sound /www/cgi-bin/hashwatcher-led \
+			/www/cgi-bin/hashwatcher-settings
 	fi
 	wget -q -O /mnt/data/hashwatcher/coin.wav -T 25 -U HashWatcher-Deck \
 		"$base/coin.wav" || true

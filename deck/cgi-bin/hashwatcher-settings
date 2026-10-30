@@ -1,0 +1,26 @@
+#!/bin/sh
+# Sound, lights, and the other screen settings. Kept on /mnt/data so a widget
+# reinstall can read them back. Tailscale login is the separate /mnt/data/tailscale tree.
+printf 'Content-Type: text/plain\r\n\r\n'
+case "$REMOTE_ADDR" in
+127.0.0.1|::1) ;;
+*)
+	exit 0
+	;;
+esac
+kind=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*kind=\([a-z]*\).*/\1/p')
+case "$kind" in
+controls|inventory|pair|paired) ;;
+*) exit 0 ;;
+esac
+dir=/mnt/data/hashwatcher
+mkdir -p "$dir"
+file="$dir/settings-$kind"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	cat > "$file"
+	printf 'ok\n'
+	exit 0
+fi
+if [ -s "$file" ]; then
+	cat "$file"
+fi
