@@ -74,10 +74,11 @@ if [ ! -x "$DIR/tailscale" ] || [ ! -x "$DIR/tailscaled" ]; then
 	esac
 	url="https://pkgs.tailscale.com/stable/tailscale_${ver}_arm.tgz"
 	say downloading 5 ""
+	: > "$WORK/tailscale.tgz"
 	wget -q -O "$WORK/tailscale.tgz" -T 900 -U HashWatcher-Deck "$url" &
 	wpid=$!
 	while kill -0 "$wpid" 2>/dev/null; do
-		size=$(wc -c < "$WORK/tailscale.tgz" 2>/dev/null | awk '{print $1}')
+		size=$(wc -c "$WORK/tailscale.tgz" 2>/dev/null | awk '{print $1}')
 		case "$size" in
 		''|*[!0-9]*) size=0 ;;
 		esac

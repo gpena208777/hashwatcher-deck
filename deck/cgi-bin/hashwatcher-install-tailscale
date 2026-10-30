@@ -20,8 +20,9 @@ mkdir -p /mnt/data/hashwatcher
 printf '{"state":"downloading","progress":1,"error":""}\n' > /mnt/data/hashwatcher/install-status.json
 printf '{"ok":true,"cmd":"install"}\n'
 trap '' HUP
-if [ -x /sbin/start-stop-daemon ]; then
-	start-stop-daemon -S -b -x /bin/sh -- /mnt/data/hashwatcher/install-tailscale.sh
-else
-	/mnt/data/hashwatcher/install-tailscale.sh >/dev/null 2>&1 &
+# Match the installer path. Matching /bin/sh fails because a shell is already running,
+# which left the screen stuck at 1% with the download never started.
+if ! start-stop-daemon -S -b -x /mnt/data/hashwatcher/install-tailscale.sh; then
+	printf '{"state":"failed","progress":0,"error":"Could not start the Tailscale install."}\n' \
+		> /mnt/data/hashwatcher/install-status.json
 fi

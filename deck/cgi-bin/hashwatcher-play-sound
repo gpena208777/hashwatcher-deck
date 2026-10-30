@@ -32,6 +32,7 @@ trap '' HUP
 	''|*[!0-9]*) cur=100 ;;
 	esac
 	amixer set Master "$vol%" >/dev/null 2>&1
-	aplay -q "$wav" >/dev/null 2>&1
+	# The Deck DAC is stereo. Plain aplay rejects this mono clip.
+	aplay -D plughw:0 -q "$wav" >/dev/null 2>&1
 	amixer set Master "$cur%" >/dev/null 2>&1
 ) >/dev/null 2>&1 &
