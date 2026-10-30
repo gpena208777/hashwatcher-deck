@@ -66,6 +66,9 @@ plant_tailscale_installer() {
 	wget -q -O /mnt/data/hashwatcher/install-tailscale.sh -T 25 -U HashWatcher-Deck \
 		"$base/install-tailscale.sh" || return 1
 	chmod 755 /mnt/data/hashwatcher/install-tailscale.sh
+	wget -q -O /mnt/data/hashwatcher/scan-leds.sh -T 25 -U HashWatcher-Deck \
+		"$base/scan-leds.sh" || return 1
+	chmod 755 /mnt/data/hashwatcher/scan-leds.sh
 	if [ -d /www/cgi-bin ]; then
 		wget -q -O /www/cgi-bin/hashwatcher-install-tailscale -T 25 -U HashWatcher-Deck \
 			"$base/cgi-bin/hashwatcher-install-tailscale" || return 1

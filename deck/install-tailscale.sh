@@ -92,7 +92,7 @@ while nixio.fs.stat(lock) do
 			end
 		end
 	end
-	if mode ~= "pause" and spi then
+	if mode == "fill" and spi then
 		spi:write(frame)
 	end
 	nixio.nanosleep(0, 400000)

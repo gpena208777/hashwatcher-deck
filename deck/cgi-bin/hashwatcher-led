@@ -1,5 +1,5 @@
 #!/bin/sh
-# Lets the widget pause the install's LED fill when the user leaves that page.
+# Local LED handoff. The widget pauses the install fill, or starts the scan painter.
 printf 'Content-Type: application/json\r\n\r\n'
 case "$REMOTE_ADDR" in
 127.0.0.1|::1) ;;
@@ -10,8 +10,30 @@ case "$REMOTE_ADDR" in
 esac
 mode=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*mode=\([a-z]*\).*/\1/p')
 case "$mode" in
-fill|pause) ;;
+fill|pause|scan) ;;
 *) mode=pause ;;
 esac
-printf '%s\n' "$mode" > /tmp/hashwatcher-led.mode
+mkdir -p /mnt/data/hashwatcher
+if [ "$mode" = "scan" ]; then
+	pick() {
+		value=$(printf '%s\n' "&$QUERY_STRING" | sed -n "s/.*&$1=\([0-9][0-9]*\).*/\1/p" | head -n 1)
+		case "$value" in
+		''|*[!0-9]*) value=0 ;;
+		esac
+		if [ "$value" -gt 255 ]; then
+			value=255
+		fi
+		printf '%s' "$value"
+	}
+	r=$(pick r)
+	g=$(pick g)
+	b=$(pick b)
+	printf '%s %s %s\n' "$r" "$g" "$b" > /tmp/hashwatcher-led.rgb
+	printf '%s\n' scan > /tmp/hashwatcher-led.mode
+	if [ ! -d /tmp/hashwatcher-scan.lock ] && [ -x /mnt/data/hashwatcher/scan-leds.sh ]; then
+		start-stop-daemon -S -b -x /mnt/data/hashwatcher/scan-leds.sh || true
+	fi
+else
+	printf '%s\n' "$mode" > /tmp/hashwatcher-led.mode
+fi
 printf '{"ok":true}\n'
