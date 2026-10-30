@@ -9,17 +9,61 @@ fi
 trap 'rmdir "$LOCK"' EXIT
 
 BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
+STATUS=/mnt/data/hashwatcher/update-status.json
+mkdir -p /mnt/data/hashwatcher
+
+say() {
+	printf '{"state":"%s","progress":%s,"error":"%s"}\n' "$1" "$2" "$3" > "$STATUS.tmp"
+	mv "$STATUS.tmp" "$STATUS"
+}
+
+fail() {
+	say failed 0 "$1"
+	exit 1
+}
+
+pace() {
+	lua -e 'require("nixio").nanosleep(0, 200000000)' >/dev/null 2>&1 || sleep 1
+}
+
+# base and cap are percents. span is bytes per percent, so a 32-bit size cannot overflow.
+fetch_file() {
+	dest=$1
+	url=$2
+	base=$3
+	span=$4
+	cap=$5
+	: > "$dest"
+	wget -q -O "$dest" -T 90 -U HashWatcher-Deck "$url" &
+	wpid=$!
+	while kill -0 "$wpid" 2>/dev/null; do
+		size=$(wc -c "$dest" 2>/dev/null | awk '{print $1}')
+		case "$size" in
+		''|*[!0-9]*) size=0 ;;
+		esac
+		pct=$((base + size / span))
+		if [ "$pct" -gt "$cap" ]; then
+			pct=$cap
+		fi
+		if [ "$pct" -lt "$base" ]; then
+			pct=$base
+		fi
+		say downloading "$pct" ""
+		pace
+	done
+	wait "$wpid"
+}
 
 manifest=$(wget -q -O - -T 25 -U HashWatcher-Deck \
-	"$BASE/release.json") || exit 1
+	"$BASE/release.json") || fail "Could not check for an update."
 version=$(printf '%s' "$manifest" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
 url=$(printf '%s' "$manifest" | sed -n 's/.*"wasm"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
 case "$version" in
-''|*[!0-9.]*) exit 1 ;;
+''|*[!0-9.]*) fail "Could not check for an update." ;;
 esac
 case "$url" in
 https://github.com/gpena208777/hashwatcher-deck/releases/download/v"$version"/hashwatcher.wasm) ;;
-*) exit 1 ;;
+*) fail "Could not check for an update." ;;
 esac
 
 installed=$(cat /mnt/data/bmc/widgets/hashwatcher/version 2>/dev/null || true)
@@ -35,34 +79,40 @@ if [ -n "$installed" ]; then
 	[ "$newer" = 1 ] || exit 0
 fi
 
+say downloading 1 ""
 tmp=/tmp/hashwatcher.wasm.new
 rm -f "$tmp"
-wget -q -O "$tmp" -T 90 -U HashWatcher-Deck "$url" || exit 1
+fetch_file "$tmp" "$url" 5 25000 30 || fail "Could not download the update."
 printf '\0asm' > /tmp/hashwatcher.wasm.magic
-head -c 4 "$tmp" | cmp -s - /tmp/hashwatcher.wasm.magic || exit 1
+head -c 4 "$tmp" | cmp -s - /tmp/hashwatcher.wasm.magic || fail "Could not download the update."
 
+say installing 32 ""
 mkdir -p /mnt/data/bmc/widgets/hashwatcher/lib/wasm
-cp "$tmp" /mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm || exit 1
+cp "$tmp" /mnt/data/bmc/widgets/hashwatcher/lib/wasm/hashwatcher.wasm || fail "Could not install the update."
 assets=https://github.com/gpena208777/hashwatcher-deck/releases/download/v"$version"/hashwatcher-assets.tar
 assets_tmp=/tmp/hashwatcher-assets.tar
 rm -f "$assets_tmp"
-wget -q -O "$assets_tmp" -T 90 -U HashWatcher-Deck "$assets" || exit 1
+fetch_file "$assets_tmp" "$assets" 32 90000 88 || fail "Could not download the update."
+say installing 90 ""
 rm -rf /mnt/data/bmc/widgets/hashwatcher/lib/assets
 mkdir -p /mnt/data/bmc/widgets/hashwatcher/lib/assets
-tar -xf "$assets_tmp" -C /mnt/data/bmc/widgets/hashwatcher/lib/assets || exit 1
+tar -xf "$assets_tmp" -C /mnt/data/bmc/widgets/hashwatcher/lib/assets || fail "Could not install the update."
 printf '%s\n' "$version" > /mnt/data/bmc/widgets/hashwatcher/version
+say installing 94 ""
 
 # Packaging helpers must sit in one directory: register-package calls assemble beside itself.
 pkg=$(mktemp -d)
 trap 'rm -rf "$pkg"; rmdir "$LOCK"' EXIT
 wget -q -O "$pkg/register-package.sh" -T 25 -U HashWatcher-Deck \
-	"$BASE/register-package.sh" || exit 1
+	"$BASE/register-package.sh" || fail "Could not install the update."
 wget -q -O "$pkg/assemble-package.sh" -T 25 -U HashWatcher-Deck \
-	"$BASE/assemble-package.sh" || exit 1
+	"$BASE/assemble-package.sh" || fail "Could not install the update."
 wget -q -O "$pkg/hashwatcher-launcher.sh" -T 25 -U HashWatcher-Deck \
-	"$BASE/hashwatcher-launcher.sh" || exit 1
+	"$BASE/hashwatcher-launcher.sh" || fail "Could not install the update."
 chmod +x "$pkg/register-package.sh" "$pkg/assemble-package.sh" "$pkg/hashwatcher-launcher.sh"
-sh "$pkg/register-package.sh" /mnt/data/bmc/widgets/hashwatcher "$version" || exit 1
+say installing 96 ""
+sh "$pkg/register-package.sh" /mnt/data/bmc/widgets/hashwatcher "$version" || fail "Could not install the update."
+say done 100 ""
 if [ -x /etc/init.d/bmc-compositor ]; then
 	/etc/init.d/bmc-compositor restart >/dev/null 2>&1 || true
 fi

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Progress for the HashWatcher update. Local requests only.
+printf 'Content-Type: application/json\r\n\r\n'
+case "$REMOTE_ADDR" in
+127.0.0.1|::1) ;;
+*)
+	printf '{"state":"idle","progress":0,"error":""}\n'
+	exit 0
+	;;
+esac
+if [ -f /mnt/data/hashwatcher/update-status.json ]; then
+	cat /mnt/data/hashwatcher/update-status.json
+else
+	printf '{"state":"idle","progress":0,"error":""}\n'
+fi
