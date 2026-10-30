@@ -12,6 +12,16 @@ if [ ! -x /mnt/data/hashwatcher/install-tailscale.sh ]; then
 	printf '{"ok":false,"error":"installer missing"}\n'
 	exit 0
 fi
+if [ -d /tmp/hashwatcher-tailscale-install.lock ]; then
+	printf '{"ok":true,"cmd":"install"}\n'
+	exit 0
+fi
+mkdir -p /mnt/data/hashwatcher
+printf '{"state":"downloading","progress":1,"error":""}\n' > /mnt/data/hashwatcher/install-status.json
 printf '{"ok":true,"cmd":"install"}\n'
 trap '' HUP
-/mnt/data/hashwatcher/install-tailscale.sh >>/mnt/data/hashwatcher/install-tailscale.log 2>&1 &
+if [ -x /sbin/start-stop-daemon ]; then
+	start-stop-daemon -S -b -x /bin/sh -- /mnt/data/hashwatcher/install-tailscale.sh
+else
+	/mnt/data/hashwatcher/install-tailscale.sh >/dev/null 2>&1 &
+fi

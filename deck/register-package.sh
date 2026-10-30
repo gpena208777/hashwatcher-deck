@@ -69,7 +69,9 @@ plant_tailscale_installer() {
 	if [ -d /www/cgi-bin ]; then
 		wget -q -O /www/cgi-bin/hashwatcher-install-tailscale -T 25 -U HashWatcher-Deck \
 			"$base/cgi-bin/hashwatcher-install-tailscale" || return 1
-		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale
+		wget -q -O /www/cgi-bin/hashwatcher-install-status -T 25 -U HashWatcher-Deck \
+			"$base/cgi-bin/hashwatcher-install-status" || return 1
+		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale /www/cgi-bin/hashwatcher-install-status
 	fi
 }
 
