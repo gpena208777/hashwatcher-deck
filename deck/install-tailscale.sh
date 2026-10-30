@@ -22,6 +22,41 @@ say() {
 	mv "$STATUS.tmp" "$STATUS"
 }
 
+# Ten LEDs, lit from the left to match the percent. The compositor redraws the
+# strip about once a second, so this keeps writing while the install runs.
+led_fill() {
+	lua -e '
+		local pct = tonumber(arg[1]) or 0
+		if pct < 0 then pct = 0 end
+		if pct > 100 then pct = 100 end
+		local lit = 0
+		if pct > 0 then lit = math.floor((pct * 10 + 99) / 100) end
+		if lit > 10 then lit = 10 end
+		local f = io.open("/dev/spidev0.0", "wb")
+		if not f then return end
+		local function pix(on)
+			if on then return string.char(255, 102, 204, 0) end
+			return string.char(224, 0, 0, 0)
+		end
+		local frame = string.char(0, 0, 0, 0)
+		for i = 1, 10 do frame = frame .. pix(i <= lit) end
+		frame = frame .. string.char(255, 255, 255, 255)
+		f:write(frame)
+		f:close()
+	' "$1" >/dev/null 2>&1 || true
+}
+(
+	while [ -d "$LOCK" ]; do
+		pct=$(sed -n 's/.*"progress":\([0-9][0-9]*\).*/\1/p' "$STATUS" 2>/dev/null | head -n 1)
+		case "$pct" in
+		""|*[!0-9]*) pct=0 ;;
+		esac
+		led_fill "$pct"
+		usleep 200000 2>/dev/null || sleep 1
+	done
+	led_fill 0
+) >/dev/null 2>&1 &
+
 fail() {
 	say failed 0 "$1"
 	exit 1
