@@ -7,6 +7,15 @@ stop|start|restart|relogin|reset)
 	printf '%s\n' "$cmd" > /mnt/data/tailscale/cmd
 	printf '{"ok":true,"cmd":"%s"}\n' "$cmd"
 	;;
+install)
+	printf '{"ok":true,"cmd":"install"}\n'
+	trap '' HUP
+	if [ -x /mnt/data/hashwatcher/install-tailscale.sh ]; then
+		/mnt/data/hashwatcher/install-tailscale.sh >>/mnt/data/hashwatcher/install-tailscale.log 2>&1 &
+	else
+		printf '%s\n' start > /mnt/data/tailscale/cmd
+	fi
+	;;
 update)
 	# Return immediately. The download and restart continue after this process exits.
 	printf '{"ok":true,"cmd":"update"}\n'

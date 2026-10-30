@@ -1,0 +1,17 @@
+#!/bin/sh
+# Local installer trigger. Tailscale itself is downloaded only after this runs.
+printf 'Content-Type: application/json\r\n\r\n'
+case "$REMOTE_ADDR" in
+127.0.0.1|::1) ;;
+*)
+	printf '{"ok":false}\n'
+	exit 0
+	;;
+esac
+if [ ! -x /mnt/data/hashwatcher/install-tailscale.sh ]; then
+	printf '{"ok":false,"error":"installer missing"}\n'
+	exit 0
+fi
+printf '{"ok":true,"cmd":"install"}\n'
+trap '' HUP
+/mnt/data/hashwatcher/install-tailscale.sh >>/mnt/data/hashwatcher/install-tailscale.log 2>&1 &

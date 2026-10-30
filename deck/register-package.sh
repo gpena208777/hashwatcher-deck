@@ -59,4 +59,19 @@ bmc-nix-cli add-packages \
 	--name widget-hashwatcher \
 	--version "$VERSION" \
 	--store-path "$store"
+# The installer script is not Tailscale. The download happens only after the user taps Install.
+plant_tailscale_installer() {
+	base=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
+	mkdir -p /mnt/data/hashwatcher
+	wget -q -O /mnt/data/hashwatcher/install-tailscale.sh -T 25 -U HashWatcher-Deck \
+		"$base/install-tailscale.sh" || return 1
+	chmod 755 /mnt/data/hashwatcher/install-tailscale.sh
+	if [ -d /www/cgi-bin ]; then
+		wget -q -O /www/cgi-bin/hashwatcher-install-tailscale -T 25 -U HashWatcher-Deck \
+			"$base/cgi-bin/hashwatcher-install-tailscale" || return 1
+		chmod 755 /www/cgi-bin/hashwatcher-install-tailscale
+	fi
+}
+
 echo "Registered widget-hashwatcher $VERSION at $store"
+plant_tailscale_installer || true
