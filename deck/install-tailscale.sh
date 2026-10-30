@@ -63,25 +63,39 @@ local function frame_for(pct)
 	for chain = 1, 10 do
 		frame = frame .. pix(level_at[11 - chain])
 	end
-	return frame .. string.char(255, 255, 255, 255)
+	-- Extra clocks so the last pixel latches before the next frame starts.
+	-- A short end frame is what makes the strip flicker between writes.
+	return frame .. string.rep(string.char(255), 12)
 end
 local pct = 0
+local mode = "fill"
+local frame = frame_for(0)
+local tick = 0
 while nixio.fs.stat(lock) do
-	local mode = "fill"
-	local mf = io.open(modefile, "r")
-	if mf then
-		mode = mf:read("*l") or "fill"
-		mf:close()
-	end
-	if mode ~= "pause" and spi then
+	tick = tick + 1
+	-- Reading the percent file on every pass leaves a gap, and the Deck
+	-- paints the strip black in that gap. Check the files rarely.
+	if tick >= 100 then
+		tick = 0
+		local mf = io.open(modefile, "r")
+		if mf then
+			mode = mf:read("*l") or mode
+			mf:close()
+		end
 		local rf = io.open(pctfile, "r")
 		if rf then
-			pct = tonumber(rf:read("*a")) or pct
+			local next_pct = tonumber(rf:read("*a"))
 			rf:close()
+			if next_pct and next_pct ~= pct then
+				pct = next_pct
+				frame = frame_for(pct)
+			end
 		end
-		spi:write(frame_for(pct))
 	end
-	nixio.nanosleep(0, 2000000)
+	if mode ~= "pause" and spi then
+		spi:write(frame)
+	end
+	nixio.nanosleep(0, 400000)
 end
 if spi then spi:close() end
 EOF
