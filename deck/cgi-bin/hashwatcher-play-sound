@@ -1,5 +1,6 @@
 #!/bin/sh
 # Play the share sound on the Deck speaker. The widget host on current firmware does not.
+# The slider scales this clip. It does not change the Deck's speaker level.
 printf 'Content-Type: application/json\r\n\r\n'
 case "$REMOTE_ADDR" in
 127.0.0.1|::1) ;;
@@ -27,12 +28,23 @@ fi
 printf '{"ok":true}\n'
 trap '' HUP
 (
-	cur=$(amixer get Master 2>/dev/null | sed -n 's/.*\[\([0-9][0-9]*\)%\].*/\1/p' | head -n 1)
-	case "$cur" in
-	''|*[!0-9]*) cur=100 ;;
-	esac
-	amixer set Master "$vol%" >/dev/null 2>&1
-	# The Deck DAC is stereo. Plain aplay rejects this mono clip.
-	aplay -D plughw:0 -q "$wav" >/dev/null 2>&1
-	amixer set Master "$cur%" >/dev/null 2>&1
+	scale=$(printf '%d.%02d' $((vol / 100)) $((vol % 100)))
+	cfg=/tmp/hashwatcher-play-$$.asound
+	cat > "$cfg" << EOF
+pcm.hwshare {
+    type route
+    slave.pcm {
+        type plug
+        slave.pcm {
+            type hw
+            card 0
+            device 0
+        }
+    }
+    ttable.0.0 $scale
+    ttable.0.1 $scale
+}
+EOF
+	ALSA_CONFIG_PATH="$cfg" aplay -D hwshare -q "$wav" >/dev/null 2>&1
+	rm -f "$cfg"
 ) >/dev/null 2>&1 &
