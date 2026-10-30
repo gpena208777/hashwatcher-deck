@@ -1,0 +1,17 @@
+#!/bin/sh
+# Lets the widget pause the install's LED fill when the user leaves that page.
+printf 'Content-Type: application/json\r\n\r\n'
+case "$REMOTE_ADDR" in
+127.0.0.1|::1) ;;
+*)
+	printf '{"ok":false}\n'
+	exit 0
+	;;
+esac
+mode=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*mode=\([a-z]*\).*/\1/p')
+case "$mode" in
+fill|pause) ;;
+*) mode=pause ;;
+esac
+printf '%s\n' "$mode" > /tmp/hashwatcher-led.mode
+printf '{"ok":true}\n'

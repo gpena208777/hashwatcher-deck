@@ -10,7 +10,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 	exit 0
 fi
 WORK=
-trap 'if [ -n "$WORK" ]; then rm -rf "$WORK"; fi; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'printf "%s\n" pause > /tmp/hashwatcher-led.mode; if [ -n "$WORK" ]; then rm -rf "$WORK"; fi; rmdir "$LOCK" 2>/dev/null' EXIT
 
 DIR=/mnt/data/tailscale
 BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
@@ -19,6 +19,11 @@ mkdir -p "$DIR/state" "$DIR/www/cgi-bin" /mnt/data/hashwatcher
 
 PCT=/tmp/hashwatcher-led.pct
 printf '0\n' > "$PCT"
+# The widget sets this to pause when the user leaves the page mid-download.
+case "$(cat /tmp/hashwatcher-led.mode 2>/dev/null)" in
+pause) ;;
+*) printf '%s\n' fill > /tmp/hashwatcher-led.mode ;;
+esac
 
 say() {
 	printf '{"state":"%s","progress":%s,"error":"%s"}\n' "$1" "$2" "$3" > "$STATUS.tmp"
@@ -26,19 +31,20 @@ say() {
 	printf '%s\n' "$2" > "$PCT"
 }
 
-# BusyBox sleep only accepts whole seconds, and the compositor blanks the
-# strip on that same one-second clock. One Lua process repaints every 100ms
-# from the percent file so the ten LEDs track the number on screen.
+# One open SPI handle for the whole download. Reopening the device blanks
+# the strip before the next frame, which is the flash between LEDs.
+# The chain's first pixel is the right end, so the fill is written backwards.
 lua - "$LOCK" "$PCT" <<'EOF' >/dev/null 2>&1 &
 local lock, pctfile = arg[1], arg[2]
+local modefile = "/tmp/hashwatcher-led.mode"
 local nixio = require("nixio")
-local function paint(pct)
+local spi = io.open("/dev/spidev0.0", "wb")
+if spi then spi:setvbuf("no") end
+local function frame_for(pct)
 	if pct < 0 then pct = 0 end
 	if pct > 100 then pct = 100 end
 	local full = math.floor(pct / 10)
 	local frac = pct / 10 - full
-	local f = io.open("/dev/spidev0.0", "wb")
-	if not f then return end
 	local function pix(level)
 		if level <= 0 then return string.char(224, 0, 0, 0) end
 		local bri = math.floor(level * 31 + 0.5)
@@ -46,28 +52,38 @@ local function paint(pct)
 		if bri > 31 then bri = 31 end
 		return string.char(224 + bri, 102, 204, 0)
 	end
-	local frame = string.char(0, 0, 0, 0)
-	for i = 1, 10 do
+	local level_at = {}
+	for pos = 1, 10 do
 		local level = 0
-		if i <= full then level = 1
-		elseif i == full + 1 then level = frac end
-		frame = frame .. pix(level)
+		if pos <= full then level = 1
+		elseif pos == full + 1 then level = frac end
+		level_at[pos] = level
 	end
-	frame = frame .. string.char(255, 255, 255, 255)
-	f:write(frame)
-	f:close()
-end
-while os.execute("test -d '" .. lock .. "'") == 0 do
-	local pct = 0
-	local rf = io.open(pctfile, "r")
-	if rf then
-		pct = tonumber(rf:read("*a")) or 0
-		rf:close()
+	local frame = string.char(0, 0, 0, 0)
+	for chain = 1, 10 do
+		frame = frame .. pix(level_at[11 - chain])
 	end
-	paint(pct)
-	nixio.nanosleep(0, 100000000)
+	return frame .. string.char(255, 255, 255, 255)
 end
-paint(0)
+local pct = 0
+while nixio.fs.stat(lock) do
+	local mode = "fill"
+	local mf = io.open(modefile, "r")
+	if mf then
+		mode = mf:read("*l") or "fill"
+		mf:close()
+	end
+	if mode ~= "pause" and spi then
+		local rf = io.open(pctfile, "r")
+		if rf then
+			pct = tonumber(rf:read("*a")) or pct
+			rf:close()
+		end
+		spi:write(frame_for(pct))
+	end
+	nixio.nanosleep(0, 2000000)
+end
+if spi then spi:close() end
 EOF
 
 tick() {
