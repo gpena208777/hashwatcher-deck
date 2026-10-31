@@ -1,0 +1,61 @@
+{
+  "$schema": "../../bmc-widget-manifest/manifest.schema.json",
+  "uid": "c4e8a1d2-7b63-4f0e-9a15-6d2b8f0c3e71",
+  "version": "1.0.18",
+  "name": "HashWatcher",
+  "description": "Bring HashWatcher to your Deck. Full control and visibility of your devices. Get Block found notifications, view device info and more.",
+  "author": {
+    "name": "HashWatcher",
+    "url": "https://hashwatcher.app"
+  },
+  "binary": "bin/hashwatcher",
+  "icon": "assets/icon.svg",
+  "category": "mining",
+  "settings": [],
+  "supported_viewports": [
+    {
+      "type": "rectangular",
+      "min_width": 1280,
+      "max_width": 1280,
+      "min_height": 480,
+      "max_height": 480
+    }
+  ],
+  "params": {
+    "inventory": {
+      "name": "Leave this blank",
+      "description": "Do not type anything here. The HashWatcher app fills this in after you pair.",
+      "optional": true,
+      "type": "string",
+      "default_value": ""
+    },
+    "inventory2": {
+      "name": "Leave this blank",
+      "description": "Do not type anything here. The HashWatcher app uses this only if your miner list is long.",
+      "optional": true,
+      "type": "string",
+      "default_value": ""
+    },
+    "inventory3": {
+      "name": "Leave this blank",
+      "description": "Do not type anything here. The HashWatcher app uses this only if your miner list is long.",
+      "optional": true,
+      "type": "string",
+      "default_value": ""
+    },
+    "inventory4": {
+      "name": "Leave this blank",
+      "description": "Do not type anything here. The HashWatcher app uses this only if your miner list is long.",
+      "optional": true,
+      "type": "string",
+      "default_value": ""
+    },
+    "deck": {
+      "name": "Leave this blank",
+      "description": "Do not type anything here. The HashWatcher app sets sound, volume, and refresh.",
+      "optional": true,
+      "type": "string",
+      "default_value": ""
+    }
+  }
+}
