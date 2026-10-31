@@ -69,7 +69,7 @@ const SUPPORT_QR: Bitmap = include_bitmap!("assets/support-qr.png");
 const SHARE_SOUND: bmc_wasm_sdk::Audio = include_audio!("assets/coin.mp3");
 const GEAR_ICON: Bitmap = include_bitmap!("assets/gear.png");
 /// Deck settings release. Bump this on each update.
-const DECK_VERSION: &str = "1.0.18";
+const DECK_VERSION: &str = "1.0.19";
 /// First look is a minute after start, then once an hour. Outbound Data must be on.
 const UPDATE_FIRST_MS: u32 = 60_000;
 /// Weather at Starbase, Texas, after one quiet minute. Applied once per Deck.
@@ -1149,6 +1149,9 @@ impl App {
             }
             if record.chart.is_empty() && !record.chart_dirty {
                 record.chart = load_chart(&record.ip);
+            }
+            if record.best_diff.is_none() {
+                record.best_diff = load_best(&record.ip);
             }
             next.push(record);
         }
@@ -2798,6 +2801,7 @@ impl App {
         let shares_accepted = existing.shares_accepted;
         let shares_seen = existing.shares_seen;
         let share_locked = existing.share_locked;
+        let kept_best = existing.best_diff.or_else(|| load_best(&existing.ip));
         *existing = miner;
         if !name.is_empty() {
             existing.name = name;
@@ -2824,6 +2828,16 @@ impl App {
             existing.shares_accepted = shares_accepted;
             existing.shares_seen = shares_seen;
             existing.share_locked = true;
+        }
+        // Rediscovery builds a fresh miner. Its best share is often the new
+        // session after a reboot, which must not replace the all-time record.
+        if let Some(old) = kept_best {
+            if existing.best_diff.is_none_or(|next| next <= old * 1.001) {
+                existing.best_diff = Some(old);
+                save_best(&existing.ip, old);
+            }
+        } else if existing.best_diff.is_none() {
+            existing.best_diff = load_best(&existing.ip);
         }
         self.tcp_queue.retain(|host| self.miners.iter().all(|miner| miner.host != *host));
     }
@@ -5158,15 +5172,42 @@ fn apply_http_poll(miner: &mut Miner, text: &str, doc: &JsonDoc) {
     }
 }
 
+fn load_best(ip: &str) -> Option<f64> {
+    let text = bmc_wasm_sdk::kv::get_string(&format!("best-{ip}"))?;
+    let value = text.trim().parse::<f64>().ok()?;
+    value.is_finite().then_some(value).filter(|value| *value > 0.0)
+}
+
+fn save_best(ip: &str, value: f64) {
+    if ip.is_empty() || !value.is_finite() || value <= 0.0 {
+        return;
+    }
+    bmc_wasm_sdk::kv::set(&format!("best-{ip}"), value.to_string().as_bytes());
+}
+
 fn commit_best_diff(miner: &mut Miner, next: Option<f64>) {
     let Some(next) = next.filter(|value| value.is_finite() && *value > 0.0) else {
         return;
     };
-    let previous = miner.best_diff;
+    // Session best resets when the miner reboots. The stored record is the
+    // all-time high, and a lower reading must not replace it or raise an alert.
+    let previous = match (miner.best_diff, load_best(&miner.ip)) {
+        (Some(current), Some(stored)) => Some(current.max(stored)),
+        (Some(current), None) => Some(current),
+        (None, Some(stored)) => Some(stored),
+        (None, None) => None,
+    };
     if previous.is_some_and(|value| next <= value * 1.001) {
+        miner.best_diff = previous;
+        if let Some(value) = previous {
+            if load_best(&miner.ip).is_none_or(|stored| value > stored * 1.001) {
+                save_best(&miner.ip, value);
+            }
+        }
         return;
     }
     miner.best_diff = Some(next);
+    save_best(&miner.ip, next);
     if previous.is_none() {
         return;
     }
@@ -7714,23 +7755,45 @@ fn sky_kind(code: i64) -> SkyKind {
 }
 
 fn push_cloud(draws: &mut Vec<Draw>, x: f32, y: f32, size: f32, color: Color) {
-    draws.push(disc(x, y + size * 0.08, size * 0.28, color));
-    draws.push(disc(x + size * 0.26, y, size * 0.36, color));
-    draws.push(disc(x + size * 0.52, y + size * 0.1, size * 0.26, color));
+    // A low shadow grounds the shape. The body is a row of puffs on a flat base,
+    // taller in the middle, with a small bright cap so it does not read as three circles.
+    let shift = ((x.abs() as u32).wrapping_mul(17) % 5) as f32 * 0.012;
+    draws.push(disc(
+        x + size * 0.42,
+        y + size * 0.30,
+        size * 0.30,
+        Color::from_rgba(86, 108, 138, 46),
+    ));
+    let puffs = [
+        (0.08, 0.20, 0.13),
+        (0.24, 0.12 - shift, 0.18),
+        (0.44, 0.04 + shift, 0.23),
+        (0.64, 0.11, 0.17),
+        (0.80, 0.18, 0.12),
+    ];
+    for (px, py, radius) in puffs {
+        draws.push(disc(x + size * px, y + size * py, size * radius, color));
+    }
+    draws.push(disc(
+        x + size * (0.40 + shift),
+        y + size * 0.02,
+        size * 0.07,
+        Color::from_rgba(255, 255, 255, 70),
+    ));
 }
 
 fn push_orb(draws: &mut Vec<Draw>, cx: f32, cy: f32, radius: f32, is_day: bool) {
-    let glow = if is_day {
-        Color::from_rgba(255, 224, 145, 90)
-    } else {
-        Color::from_rgba(199, 214, 255, 70)
-    };
     let body = if is_day {
         Color::from_rgba(255, 227, 140, 235)
     } else {
-        Color::from_rgba(221, 230, 255, 220)
+        Color::from_rgba(232, 238, 250, 235)
     };
-    draws.push(disc(cx, cy, radius * 1.7, glow));
+    // Night glow stays just outside the disc. A 1.7x halo reads as a blob around the moon.
+    if is_day {
+        draws.push(disc(cx, cy, radius * 1.28, Color::from_rgba(255, 220, 140, 55)));
+    } else {
+        draws.push(disc(cx, cy, radius * 1.08, Color::from_rgba(214, 224, 245, 36)));
+    }
     if is_day {
         for index in 0..8 {
             let angle = index as f32 / 8.0 * 6.28318;

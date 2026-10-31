@@ -1,7 +1,7 @@
 {
   "$schema": "../../bmc-widget-manifest/manifest.schema.json",
   "uid": "c4e8a1d2-7b63-4f0e-9a15-6d2b8f0c3e71",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "name": "HashWatcher",
   "description": "Bring HashWatcher to your Deck. Full control and visibility of your devices. Get Block found notifications, view device info and more.",
   "author": {
