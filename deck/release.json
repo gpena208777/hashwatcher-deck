@@ -1,5 +1,5 @@
 {
-  "version": "1.0.17",
-  "wasm": "https://github.com/gpena208777/hashwatcher-deck/releases/download/v1.0.17/hashwatcher.wasm",
-  "nar": "https://github.com/gpena208777/hashwatcher-deck/releases/download/v1.0.17/hashwatcher.nar"
+  "version": "1.0.18",
+  "wasm": "https://github.com/gpena208777/hashwatcher-deck/releases/download/v1.0.18/hashwatcher.wasm",
+  "nar": "https://github.com/gpena208777/hashwatcher-deck/releases/download/v1.0.18/hashwatcher.nar"
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Download the official Tailscale build. The widget package starts this when
+# Download the official Tailscale build. A Deck update starts this when
 # Tailscale is not installed yet. The binary itself is not stored in the package.
 # The download stays on /mnt/data. /tmp is a small RAM disk and cannot hold the archive.
 trap '' HUP

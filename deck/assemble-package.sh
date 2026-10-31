@@ -14,9 +14,10 @@
 #
 #   lib/bmc-widgets/hashwatcher/
 #     manifest.json
-#     bin/hashwatcher          # official WASM launcher (SDK major 0)
+#     bin/hashwatcher          # official WASM launcher (SDK major 0), byte for byte
 #     lib/wasm/hashwatcher.wasm
 #     assets/icon.svg
+#     lib/assets/                # wasm images, plus the Tailscale installer as data
 #
 # Usage: assemble-package.sh <dest-root> <wasm-path> [manifest-path] [icon-path] [asset-root]
 # dest-root receives the lib/ tree (it is created if missing).
@@ -68,37 +69,39 @@ cp "$ICON" "$DEST/assets/icon.svg"
 # Deck .nar validation requires a byte-for-byte match.
 cp "$SCRIPT_DIR/hashwatcher-launcher.sh" "$DEST/bin/$WIDGET"
 chmod 755 "$DEST/bin/$WIDGET"
-# Helpers the launcher copies onto the Deck. A Deck update downloads this
-# script by itself, so missing files are fetched from the public repo.
-# Install Widget does not run register-package.sh, so they travel in the package.
-SHARE_BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
-mkdir -p "$DEST/share"
-place_share() {
-	dest=$1
-	localpath=$2
-	url=$3
-	if [ -f "$localpath" ]; then
-		cp "$localpath" "$dest"
-		return 0
-	fi
-	wget -q -O "$dest" -T 25 -U HashWatcher-Deck "$url"
-}
-place_share "$DEST/share/install-tailscale.sh" "$SCRIPT_DIR/install-tailscale.sh" "$SHARE_BASE/install-tailscale.sh"
-place_share "$DEST/share/scan-leds.sh" "$SCRIPT_DIR/scan-leds.sh" "$SHARE_BASE/scan-leds.sh"
-place_share "$DEST/share/supervise.sh" "$SCRIPT_DIR/supervise.sh" "$SHARE_BASE/supervise.sh"
-place_share "$DEST/share/coin.wav" "$SCRIPT_DIR/coin.wav" "$SHARE_BASE/coin.wav"
-place_share "$DEST/share/action" "$SCRIPT_DIR/cgi-bin/action" "$SHARE_BASE/cgi-bin/action"
-place_share "$DEST/share/update-widget" "$SCRIPT_DIR/cgi-bin/update-widget" "$SHARE_BASE/cgi-bin/update-widget"
-for name in hashwatcher-install-tailscale hashwatcher-install-status hashwatcher-play-sound \
-	hashwatcher-led hashwatcher-settings hashwatcher-update-status hashwatcher-update; do
-	place_share "$DEST/share/$name" "$SCRIPT_DIR/cgi-bin/$name" "$SHARE_BASE/cgi-bin/$name"
-done
-chmod 755 "$DEST/share/"* 2>/dev/null || true
 # The wasm references compiled images under lib/assets. An empty directory
 # makes the widget crash on startup and the Deck stays on Loading Scene.
 if [ -n "$ASSET_SRC" ] && [ -d "$ASSET_SRC" ]; then
 	cp -a "$ASSET_SRC"/. "$DEST/lib/assets"/
 fi
+# Install Widget rejects anything outside assets/ and lib/assets/, and it
+# rejects an executable file in those directories. The Tailscale installer
+# travels here as data. Deck updates run it from register-package.sh.
+# A changed launcher cannot: the Deck requires Braiins' wrapper byte for byte.
+BOOT="$DEST/lib/assets/boot"
+mkdir -p "$BOOT"
+place_boot() {
+	dest=$1
+	localpath=$2
+	url=$3
+	if [ -f "$localpath" ]; then
+		cp "$localpath" "$dest"
+	else
+		wget -q -O "$dest" -T 25 -U HashWatcher-Deck "$url"
+	fi
+	chmod 644 "$dest"
+}
+SHARE_BASE=https://raw.githubusercontent.com/gpena208777/hashwatcher-deck/main/deck
+place_boot "$BOOT/install-tailscale.sh" "$SCRIPT_DIR/install-tailscale.sh" "$SHARE_BASE/install-tailscale.sh"
+place_boot "$BOOT/scan-leds.sh" "$SCRIPT_DIR/scan-leds.sh" "$SHARE_BASE/scan-leds.sh"
+place_boot "$BOOT/supervise.sh" "$SCRIPT_DIR/supervise.sh" "$SHARE_BASE/supervise.sh"
+place_boot "$BOOT/coin.wav" "$SCRIPT_DIR/coin.wav" "$SHARE_BASE/coin.wav"
+place_boot "$BOOT/action" "$SCRIPT_DIR/cgi-bin/action" "$SHARE_BASE/cgi-bin/action"
+place_boot "$BOOT/update-widget" "$SCRIPT_DIR/cgi-bin/update-widget" "$SHARE_BASE/cgi-bin/update-widget"
+for name in hashwatcher-install-tailscale hashwatcher-install-status hashwatcher-play-sound \
+	hashwatcher-led hashwatcher-settings hashwatcher-update-status hashwatcher-update; do
+	place_boot "$BOOT/$name" "$SCRIPT_DIR/cgi-bin/$name" "$SHARE_BASE/cgi-bin/$name"
+done
 
 find "$DEST" -name '._*' -exec rm -f {} + 2>/dev/null || true
 find "$DEST" -name '*.wasm.bak*' -exec rm -f {} + 2>/dev/null || true
